@@ -27,7 +27,7 @@ source-repository head
 
 
 Flag dev {
-  Description: Turn off optimization and make warnings errors
+  Description: Turn off optimization
   Default: False
 }
 
@@ -35,7 +35,7 @@ Flag dev {
 Executable elm-language-server
     default-language: Haskell2010
     if flag(dev)
-        ghc-options: -O0 -Wall -Werror
+        ghc-options: -O0 -Wall
     else
         ghc-options: -O2 -rtsopts -threaded "-with-rtsopts=-N -qg"
 

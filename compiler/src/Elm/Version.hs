@@ -24,7 +24,6 @@ import Data.Binary (Binary, get, put, getWord8, putWord8)
 import qualified Data.Version as Version
 import Data.Word (Word8, Word16)
 import Foreign.Ptr (Ptr, plusPtr, minusPtr)
-import qualified Paths_elm_language_server
 
 import qualified Json.Decode as D
 import qualified Json.Encode as E
@@ -55,9 +54,14 @@ max =
   Version maxBound 0 0
 
 
+{-| Elm language version the LS works with. -}
+languageServerElmVersion :: Version.Version
+languageServerElmVersion = Version.Version [0, 19, 1] []
+
+
 compiler :: Version
 compiler =
-  case map fromIntegral (Version.versionBranch Paths_elm_language_server.version) of
+  case map fromIntegral (Version.versionBranch languageServerElmVersion) of
     major : minor : patch : _ ->
       Version major minor patch
 
