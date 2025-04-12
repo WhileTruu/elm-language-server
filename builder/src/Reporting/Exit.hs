@@ -13,7 +13,7 @@ module Reporting.Exit
   , Solver(..)
   , Outline(..)
   , OutlineProblem(..)
-  , Details(..)
+  , Details(..), toDetailsReport
   , DetailsBadDep(..)
   , PackageProblem(..)
   , RegistryProblem(..)

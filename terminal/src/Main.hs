@@ -16,31 +16,73 @@ import Terminal
 import Terminal.Helpers
 
 import qualified Bump
-import qualified Develop
+-- import qualified Develop
 import qualified Diff
 import qualified Init
 import qualified Install
 import qualified Make
 import qualified Publish
 import qualified Repl
-
+import qualified LanguageServer
 
 
 -- MAIN
 
-
 main :: IO ()
-main =
-  Terminal.app intro outro
-    [ repl
-    , init
-    , reactor
-    , make
-    , install
-    , bump
-    , diff
-    , publish
+main =  
+  Terminal.app languageServerIntro languageServerOutro
+    languageServer
+
+languageServerIntro :: P.Doc
+languageServerIntro =
+  P.vcat
+    [ P.fillSep
+        [ "Welcome to"
+        , P.yellow "WhileTruu's Elm language server!"
+        ]
     ]
+
+
+languageServerOutro :: P.Doc
+languageServerOutro =
+  P.fillSep $ map P.text $ words $
+    "Whatever!"
+
+
+languageServer :: Terminal.Command
+languageServer =
+  let
+    summary =
+      "Start the Elm language server."
+
+    details =
+      "Start the Elm language server:"
+
+    example =
+      reflow
+        "The server listens on stdin."
+
+  in
+  -- FIXME: the "start" cmd name here doesn't matter
+  Terminal.Command "start" (Common summary) details example noArgs noFlags (\_ _ -> LanguageServer.run)
+
+
+
+-- OLD MAIN
+
+
+-- main :: IO ()
+-- main =
+--   Terminal.app intro outro
+--     [ repl
+--     , init
+--     , reactor
+--     , make
+--     , install
+--     , bump
+--     , diff
+--     , publish
+--     ]
 
 
 intro :: P.Doc
@@ -133,39 +175,39 @@ interpreter =
 -- REACTOR
 
 
-reactor :: Terminal.Command
-reactor =
-  let
-    summary =
-      "Compile code with a click. It opens a file viewer in your browser, and\
-      \ when you click on an Elm file, it compiles and you see the result."
+-- reactor :: Terminal.Command
+-- reactor =
+--   let
+--     summary =
+--       "Compile code with a click. It opens a file viewer in your browser, and\
+--       \ when you click on an Elm file, it compiles and you see the result."
+--
+--     details =
+--       "The `reactor` command starts a local server on your computer:"
+--
+--     example =
+--       reflow
+--         "After running that command, you would have a server at <http://localhost:8000>\
+--         \ that helps with development. It shows your files like a file viewer. If you\
+--         \ click on an Elm file, it will compile it for you! And you can just press\
+--         \ the refresh button in the browser to recompile things."
+--
+--     reactorFlags =
+--       flags Develop.Flags
+--         |-- flag "port" port_ "The port of the server (default: 8000)"
+--   in
+--   Terminal.Command "reactor" (Common summary) details example noArgs reactorFlags Develop.run
 
-    details =
-      "The `reactor` command starts a local server on your computer:"
 
-    example =
-      reflow
-        "After running that command, you would have a server at <http://localhost:8000>\
-        \ that helps with development. It shows your files like a file viewer. If you\
-        \ click on an Elm file, it will compile it for you! And you can just press\
-        \ the refresh button in the browser to recompile things."
-
-    reactorFlags =
-      flags Develop.Flags
-        |-- flag "port" port_ "The port of the server (default: 8000)"
-  in
-  Terminal.Command "reactor" (Common summary) details example noArgs reactorFlags Develop.run
-
-
-port_ :: Parser Int
-port_ =
-  Parser
-    { _singular = "port"
-    , _plural = "ports"
-    , _parser = readMaybe
-    , _suggest = \_ -> return []
-    , _examples = \_ -> return ["3000","8000"]
-    }
+-- port_ :: Parser Int
+-- port_ =
+--   Parser
+--     { _singular = "port"
+--     , _plural = "ports"
+--     , _parser = readMaybe
+--     , _suggest = \_ -> return []
+--     , _examples = \_ -> return ["3000","8000"]
+--     }
 
 
 
@@ -336,3 +378,6 @@ stack docs =
 reflow :: String -> P.Doc
 reflow string =
   P.fillSep $ map P.text $ words string
+
+
+

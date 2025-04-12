@@ -20,3 +20,7 @@ For multiple versions, previous versions, and uninstallation, see the instructio
 If you are stuck, ask around on [the Elm slack channel][slack]. Folks are friendly and happy to help with questions!
 
 [slack]: http://elmlang.herokuapp.com/
+
+
+## Build 
+`cabal new-build --ghc-option=-split-sections` seems to work!
