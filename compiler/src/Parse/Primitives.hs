@@ -21,7 +21,7 @@ module Parse.Primitives
 import Prelude hiding (length)
 import qualified Control.Applicative as Applicative (Applicative(..))
 import qualified Data.ByteString.Internal as B
-import Data.Word (Word8, Word16)
+import Data.Word (Word8, Word16, Word32)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peek)
 import Foreign.ForeignPtr (ForeignPtr, touchForeignPtr)
@@ -57,7 +57,7 @@ data State = -- PERF try taking some out to avoid allocation
     }
 
 
-type Row = Word16
+type Row = Word32
 type Col = Word16
 
 

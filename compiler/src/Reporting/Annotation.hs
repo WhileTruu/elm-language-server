@@ -18,7 +18,7 @@ module Reporting.Annotation
 import Prelude hiding (traverse)
 import Control.Monad (liftM2)
 import Data.Binary (Binary, get, put)
-import Data.Word (Word16)
+import Data.Word (Word16, Word32)
 
 
 
@@ -55,7 +55,7 @@ merge (At r1 _) (At r2 _) value =
 
 data Position =
   Position
-    {-# UNPACK #-} !Word16
+    {-# UNPACK #-} !Word32
     {-# UNPACK #-} !Word16
   deriving (Eq)
 
