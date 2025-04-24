@@ -23,6 +23,7 @@ import qualified Data.Name as Name
 import qualified Data.Map.Utils as Map
 import qualified Data.Map.Strict as Map
 import qualified Data.Utf8 as Utf8
+import qualified Data.Set as Set
 
 import qualified System.IO as IO
 import qualified System.Directory as Dir
@@ -64,9 +65,8 @@ newtype State = State
 
 run :: IO ()
 run = do
-  IO.hPutStr IO.stderr $ "creating state"
   state <- State <$> Control.Concurrent.MVar.newMVar Map.empty
-  IO.hPutStr IO.stderr $ "state created"
+
   loop state
 
   where
@@ -109,9 +109,9 @@ run = do
                                          [ "openClose" .= True
                                          , "change" .= (2 :: Int)
                                          ]
-                                    -- , "referencesProvider" .= Aeson.object
-                                    --   [ "workDoneProgress" .= True
-                                    --   ]
+                                    , "referencesProvider" .= Aeson.object
+                                       [ "workDoneProgress" .= True
+                                       ]
                                     -- , "hoverProvider" .= Aeson.object
                                     --   [ "workDoneProgress" .= True
                                     --   ]
@@ -154,10 +154,8 @@ run = do
                     Right (version, filePath, text) ->
                       do  let mVar = _changedFiles state
 
-                          IO.hPutStr IO.stderr $ "open: putting mvar"
                           Control.Concurrent.MVar.modifyMVar_ mVar $ \a ->
                             return $ Map.insert filePath text a
-                          IO.hPutStr IO.stderr $ "open: put mvar"
 
                           loop state
 
@@ -182,10 +180,8 @@ run = do
                     Right filePath ->
                       do  let mVar = _changedFiles state
 
-                          IO.hPutStr IO.stderr $ "open: putting mvar"
                           Control.Concurrent.MVar.modifyMVar_ mVar $ \a ->
                             return $ Map.delete filePath a
-                          IO.hPutStr IO.stderr $ "open: put mvar"
 
                           loop state
 
@@ -245,22 +241,74 @@ run = do
 
                     Right (id, filePath, position) ->
                       do  sendCreateWorkDoneProgress "go-to-definition-progress"
-                          sendProgressBegin "go-to-definition-progress" "👀 Finding definition..."
+                          sendProgressBegin "go-to-definition-progress" "👀 Finding definition"
 
                           startTime <- Data.Time.getCurrentTime
                           result <- Task.run $ findDefinition state filePath position
                           endTime <- Data.Time.getCurrentTime
 
                           sendProgressEnd "go-to-definition-progress" $
-                             "Finding definition took " ++ show (Data.Time.diffUTCTime endTime startTime)
+                             "Done in " ++ show (Data.Time.diffUTCTime endTime startTime)
 
                           case result of
-                            Right (definitionFilePath, region) ->
+                            Right (definitionFilePath, _, A.At region _) ->
                               do  respond id $ encodeRegion definitionFilePath region
                                   loop state
 
                             Left err ->
                               do  respondErr id $ Reporting.Exit.toString $
+                                    definitionExitToReport filePath err
+                                  loop state
+
+            Right "textDocument/references" ->
+              do  let result =
+                        Aeson.parseEither (\obj ->
+                          do  params <- obj .: "params"
+                              id <- obj .: "id" :: Aeson.Parser Int
+
+                              textDocument <- params .: "textDocument"
+                              uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                              position <- params .: "position"
+                              row <- position .: "line" :: Aeson.Parser Int
+                              column <- position .: "character" :: Aeson.Parser Int
+
+                              let filePath = drop 7 uri
+                              let position = A.Position
+                                               (fromIntegral row + 1)
+                                               (fromIntegral column + 1)
+
+                              return (id, filePath, position)
+                        ) =<< Aeson.eitherDecode body
+
+                  case result of
+                    Left err ->
+                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
+                          loop state
+
+                    Right (id, filePath, position) ->
+                      do  -- FIXME: use provided work done token?
+                          sendCreateWorkDoneProgress "find-references"
+                          sendProgressBegin "find-references" "🔍 Finding references"
+
+                          startTime <- Data.Time.getCurrentTime
+                          result <- Task.run $ findReferences state filePath position
+                          endTime <- Data.Time.getCurrentTime
+                          let timeDiff = Data.Time.diffUTCTime endTime startTime
+
+                          case result of
+                            Right references ->
+                              do  sendProgressEnd "find-references" $
+                                    "Found " ++ show (length references) ++ " in " ++ show timeDiff
+
+                                  respond id $ Aeson.toJSON $ map (uncurry encodeRegion) references
+                                  loop state
+
+                            Left err ->
+                              do  sendProgressEnd "find-references" $
+                                    "Failed " ++ show (length result) ++ " in " ++ show timeDiff
+
+                                  respondErr id $ Reporting.Exit.toString $
                                     definitionExitToReport filePath err
                                   loop state
 
@@ -356,7 +404,6 @@ sendProgressBegin token title = do
       , "value" Aeson..= Aeson.object
         [ "kind" Aeson..= ("begin" :: String)
         , "title" Aeson..= title
-        -- , "message" Aeson..= ("YOLO" :: String)
         ]
       ]
     )
@@ -517,7 +564,20 @@ definitionExitToReport path exit =
         []
 
 
-findDefinition :: State -> FilePath -> A.Position -> Task.Task DefinitionExit (FilePath, A.Region)
+type Found = A.Located Found_
+
+
+data Found_
+  = FoundValue Src.Value
+  | FoundPattern Src.Pattern_
+  | FoundDef Src.Def
+
+
+findDefinition :: 
+  State 
+  -> FilePath 
+  -> A.Position 
+  -> Task.Task DefinitionExit (FilePath, ModuleName.Raw, Found)
 findDefinition state filePath position =
   Task.eio id $ BW.withScope $ \scope -> Task.run $
   do  maybeRoot <- Task.io $ Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
@@ -528,72 +588,86 @@ findDefinition state filePath position =
         Just root ->
           Task.eio id $ Stuff.withRootLock root $ Task.run $
 
-          do  Task.io (IO.hPutStr IO.stderr $ "Root: " ++ root)
-              Task.io (IO.hFlush IO.stderr)
-
-              details <-
+          do  details <-
                 Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
 
-              files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
-
-              source <-
-                maybe (Task.io $ File.readUtf8 filePath) return $
-                  (fmap BSC.pack $ Map.lookup filePath files)
-
-              let projectType =
-                    case Details._outline details of
-                      Details.ValidApp _ -> Parse.Application
-                      Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
-
-              srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
-                Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                  return (Parse.fromByteString projectType source)
-
-              entity <- maybe (Task.throw DefinitionExitNoDefinedEntity) return $
-                findDefinedEntityInValues position srcModule
-
-              let row = ((\(A.Position row _) -> row) position)
-
-              _ <- Task.io $ sendProgressReport "go-to-definition-progress" $
-                     "Entity: " ++ definedEntityToStr entity
-
-              case entity of
-                DEVar defs patterns Src.LowVar name ->
-                  do  let local = fmap (\a -> (filePath, a)) $ 
-                                    findDefinitionForLowVarLocally srcModule defs patterns name
-                      external <- findDefinitionForLowVarInImports state details imports_ name
-
-                      return (local <|> external)
-                        >>= maybe (Task.throw $ DefinitionExitNotFound entity) return
-
-                DEVarQual _ _ Src.LowVar mod name ->
-                  findDefinitionForLowVarQualInImports state details imports_ mod name
-                    >>= maybe (Task.throw $ DefinitionExitNotFound entity) return
-
-                _ ->
-                  Task.throw $ DefinitionExitNotFound entity
+              findDefinition_ state details filePath position
 
 
-findDefinitionForLowVarLocally :: Src.Module -> [A.Located Src.Def] -> [Src.Pattern] -> Name -> Maybe A.Region
+findDefinition_ :: 
+  State 
+  -> Details.Details 
+  -> FilePath 
+  -> A.Position 
+  -> Task.Task DefinitionExit (FilePath, ModuleName.Raw, Found)
+findDefinition_ state details filePath position =
+    do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+
+        source <-
+          maybe (Task.io $ File.readUtf8 filePath) return $
+            (fmap BSC.pack $ Map.lookup filePath files)
+
+        let projectType =
+              case Details._outline details of
+                Details.ValidApp _ -> Parse.Application
+                Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
+
+        srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
+          Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+            return (Parse.fromByteString projectType source)
+
+        entity <- maybe (Task.throw DefinitionExitNoDefinedEntity) return $
+          findDefinedEntityInValues position srcModule
+
+        let row = ((\(A.Position row _) -> row) position)
+
+        case entity of
+          DEVar defs patterns Src.LowVar name ->
+            do  let local = fmap (\a -> (filePath, Src.getName srcModule, a)) $ 
+                              findDefinitionForLowVarLocally srcModule defs patterns name
+                external <- findDefinitionForLowVarInImports state details imports_ name
+
+                maybe (Task.throw $ DefinitionExitNotFound entity) return $
+                  local <|> fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) external
+
+          DEVarQual _ _ Src.LowVar mod name ->
+            do  imported <- findDefinitionForLowVarQualInImports state details imports_ mod name
+
+                maybe (Task.throw $ DefinitionExitNotFound entity) return $
+                  fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) imported
+
+          _ ->
+            Task.throw $ DefinitionExitNotFound entity
+
+
+findDefinitionForLowVarLocally :: Src.Module -> [A.Located Src.Def] -> [Src.Pattern] -> Name -> Maybe Found
 findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns name =
   let
     inDefs =
       foldr
         (\(A.At _ def) acc ->
           case def of
-            (Src.Define (A.At region valueName) _ _ _) -> if valueName == name then Just region else acc
-            (Src.Destruct pattern _) -> findDefinitionForNameInPattern name pattern
+            (Src.Define (A.At region valueName) _ _ _) -> 
+              if valueName == name then Just (A.At region (FoundDef def)) else acc
+            (Src.Destruct pattern _) -> 
+              fmap (\(a, b) -> A.At a (FoundPattern b)) (findDefinitionForNameInPattern name pattern)
         )
         Nothing
         defs
 
     inPatterns =
-      foldr (\p acc -> findDefinitionForNameInPattern name p <|> acc) Nothing patterns
+      foldr 
+        (\p acc -> 
+          fmap (\(a, b) -> A.At a (FoundPattern b)) 
+            (findDefinitionForNameInPattern name p) <|> acc
+        )
+        Nothing 
+        patterns
 
     inValues =
       foldr
-        (\(A.At _ (Src.Value (A.At region valueName) _ _ _)) acc ->
-          if valueName == name then Just region else acc
+        (\(A.At _ value@(Src.Value (A.At region valueName) _ _ _)) acc ->
+          if valueName == name then Just (A.At region (FoundValue value)) else acc
         )
         Nothing
         values
@@ -607,7 +681,7 @@ findDefinitionForLowVarQualInImports ::
   -> [Src.Import]
   -> Name
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, A.Region))
+  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Value))
 findDefinitionForLowVarQualInImports state details imports qual name =
   let
     potentialSources =
@@ -633,7 +707,7 @@ findDefinitionForLowVarInImports ::
   -> Details.Details
   -> [Src.Import]
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, A.Region))
+  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Value))
 findDefinitionForLowVarInImports state details imports name =
   let
     potentialSources =
@@ -668,11 +742,9 @@ findDefinitionForNameInModule ::
   -> Details.Details
   -> ModuleName.Raw
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, A.Region))
+  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Value))
 findDefinitionForNameInModule state details moduleName name =
   do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
-
-      pkgPath <- Task.io (lookupPkgPath details moduleName)
 
       (projectType, filePath) <-
         Task.mio (DefinitionExitModuleNotFound moduleName) $
@@ -697,7 +769,7 @@ findDefinitionForNameInModule state details moduleName name =
               Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
                 return (Parse.fromByteString projectType source)
 
-            return (fmap (\a -> (filePath, a)) $ findLowVarDefinitionNamed name srcModule)
+            return (fmap (\a -> (filePath, moduleName, a)) $ findLowVarDefinitionNamed name srcModule)
       else
         return Nothing
 
@@ -730,24 +802,27 @@ lookupPkgName details canModuleName =
     Details._foreigns details
 
 
-findLowVarDefinitionNamed :: Name -> Src.Module -> Maybe A.Region
+findLowVarDefinitionNamed :: Name -> Src.Module -> Maybe (A.Located Src.Value)
 findLowVarDefinitionNamed name (Src.Module _ _ _ _ values _ _ _ _) =
-  foldr (\(A.At _ (Src.Value name_ _ _ _)) acc ->
-      if A.toValue name_ == name then Just (A.toRegion name_) else acc
+  foldr (\value@(A.At _ (Src.Value name_ _ _ _)) acc ->
+      if A.toValue name_ == name then Just value else acc
     )
     Nothing
     values
 
 
-findDefinitionForNameInPattern :: Name -> Src.Pattern -> Maybe A.Region
+findDefinitionForNameInPattern :: Name -> Src.Pattern -> Maybe (A.Region, Src.Pattern_)
 findDefinitionForNameInPattern name pattern@(A.At _ pattern_) =
   case pattern_ of
     Src.PVar pname ->
-      if pname == name then Just (A.toRegion pattern) else Nothing
+      if pname == name then Just (A.toRegion pattern, A.toValue pattern) else Nothing
     Src.PRecord names ->
-      foldr (\(A.At loc name_) acc -> if name_ == name then Just loc else acc) Nothing names
+      foldr (\(A.At loc name_) acc -> if name_ == name then Just (loc, pattern_) else acc) Nothing names
     Src.PAlias aPattern (A.At loc aName) ->
-      if aName == name then Just loc else findDefinitionForNameInPattern name aPattern
+      if aName == name then 
+        Just (loc, pattern_) 
+      else
+        findDefinitionForNameInPattern name aPattern
     Src.PTuple a b c ->
       foldr (\p acc -> findDefinitionForNameInPattern  name p <|> acc) Nothing (a : b : c)
     Src.PList patterns ->
@@ -982,6 +1057,177 @@ findDefinedEntityInExpr position defs patterns expr =
 
     Src.Shader _ _ ->
       Nothing
+
+
+
+-- REFERENCES
+
+
+findReferences :: State -> FilePath -> A.Position -> Task.Task DefinitionExit [(FilePath, A.Region)]
+findReferences state filePath position =
+  Task.eio id $ BW.withScope $ \scope -> Task.run $
+  do  maybeRoot <- Task.io $ Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+      case maybeRoot of
+        Nothing ->
+          Task.throw DefinitionExitNoRoot
+
+        Just root ->
+          Task.eio id $ Stuff.withRootLock root $ Task.run $
+
+          do  details <-
+                Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
+
+              definition <- findDefinition_ state details filePath position
+
+              case definition of
+                (modulePath, moduleName, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) -> 
+                  do  let importers = importersOf details moduleName
+
+                      files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+
+                      source <-
+                        maybe (Task.io $ File.readUtf8 modulePath) return $
+                          (fmap BSC.pack $ Map.lookup modulePath files)
+
+                      let projectType =
+                            case Details._outline details of
+                              Details.ValidApp _ -> Parse.Application
+                              Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
+
+                      srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
+                        Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+                          return (Parse.fromByteString projectType source)
+
+                      let localRefs = map (\a -> (modulePath, a)) 
+                            (varNamedInModule (A.toValue name) srcModule)
+
+                      foldr
+                        (\a acc ->
+                          do  path <- Task.mio (DefinitionExitModuleNotFound a) $ 
+                                        return (lookupModulePath details a)
+
+                              source <-
+                                maybe (Task.io $ File.readUtf8 path) return $
+                                  (fmap BSC.pack $ Map.lookup path files)
+
+                              let projectType =
+                                    case Details._outline details of
+                                      Details.ValidApp _ -> Parse.Application
+                                      Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
+
+                              srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
+                                Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+                                  return (Parse.fromByteString projectType source)
+
+                              foundRefs <- acc
+
+                              return foundRefs
+                        )
+                        (return localRefs)
+                        (Set.toList importers)
+
+                _ -> return []
+
+
+importersOf :: Details.Details -> ModuleName.Raw -> Set.Set ModuleName.Raw
+importersOf details targetModule =
+  let locals = Details._locals details 
+  in 
+  Map.foldrWithKey 
+    (\localModuleName localDetails found ->
+      if List.elem targetModule (Details._deps localDetails)
+        then Set.insert localModuleName found
+        else found
+    )
+    Set.empty
+    locals
+
+
+varNamedInModule :: Name -> Src.Module -> [A.Region]
+varNamedInModule name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
+    List.concatMap 
+      (\(A.At _ (Src.Value _ _ expr _)) -> 
+        varNamedInExpr name [] expr
+      )
+      values
+
+
+varNamedInExpr :: Name -> [A.Region] -> Src.Expr -> [A.Region]
+varNamedInExpr name foundRegions (A.At region expr_) =
+    case expr_ of
+        Src.Chr _ -> foundRegions
+        Src.Str _ -> foundRegions
+        Src.Int _ -> foundRegions
+        Src.Float _ -> foundRegions
+        Src.Var _ varName -> if varName == name then region : foundRegions else foundRegions
+        Src.VarQual _ qual varName-> foundRegions
+        Src.List exprs -> List.foldl (varNamedInExpr name) foundRegions exprs
+        Src.Op opName -> if opName == name then region : foundRegions else foundRegions
+        Src.Negate expr -> varNamedInExpr name foundRegions expr
+
+        Src.Binops exprsAndNames expr ->
+            List.foldl
+                (\foundRegions (expr_, _) -> varNamedInExpr name foundRegions expr_)
+                (varNamedInExpr name foundRegions expr)
+                exprsAndNames
+
+        Src.Lambda patterns expr -> varNamedInExpr name foundRegions expr
+        Src.Call expr exprs ->
+            List.foldl
+                (varNamedInExpr name)
+                (varNamedInExpr name foundRegions expr)
+                exprs
+
+        Src.If listTupleExprs expr ->
+            List.foldl
+                (\foundRegions (one, two) ->
+                    varNamedInExpr name (varNamedInExpr name foundRegions one) two
+                )
+                (varNamedInExpr name foundRegions expr)
+                listTupleExprs
+
+        Src.Let defs expr ->
+            List.foldl
+                (\foundRegions (A.At _ def_) ->
+                    case def_ of
+                        Src.Define (A.At _ name_) _ expr_ _ ->
+                            varNamedInExpr name foundRegions expr_
+
+                        Src.Destruct pattern expr_ ->
+                            varNamedInExpr name foundRegions expr_
+                )
+                (varNamedInExpr name foundRegions expr)
+                defs
+
+        Src.Case expr branches ->
+            List.foldl
+                (\foundRegions (pattern, branchExpr) ->
+                    varNamedInExpr name (varNamedInExpr name foundRegions branchExpr) expr
+                )
+                (varNamedInExpr name foundRegions expr)
+                branches
+
+        Src.Accessor _ -> foundRegions
+        Src.Access expr _ -> varNamedInExpr name foundRegions expr
+
+        Src.Update _ fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) -> varNamedInExpr name foundRegions fieldExpr)
+                foundRegions
+                fields
+
+        Src.Record fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) -> varNamedInExpr name foundRegions fieldExpr)
+                foundRegions
+                fields
+
+        Src.Unit -> foundRegions
+        Src.Tuple exprA exprB exprs ->
+            List.foldl (varNamedInExpr name)
+                foundRegions
+                (exprA : exprB : exprs)
+        Src.Shader _ _ -> foundRegions
 
 
 
