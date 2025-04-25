@@ -1101,7 +1101,6 @@ findReferences state filePath position =
                       let localRefs = map (\a -> (modulePath, a))
                             (varInModule (A.toValue name) srcModule)
 
-                      -- FIXME: PARALLELIZE! Mega slow otherwise.
                       foldr
                         (\a acc ->
                           do  path <- Task.mio (DefinitionExitModuleNotFound a) $
