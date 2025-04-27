@@ -571,6 +571,7 @@ data Found_
   = FoundValue Src.Value
   | FoundPattern Src.Pattern_
   | FoundDef Src.Def
+  | FoundInfix Src.Infix
 
 
 findDefinition ::
@@ -636,6 +637,12 @@ findDefinition_ state details filePath position =
                 maybe (Task.throw $ DefinitionExitNotFound entity) return $
                   fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) imported
 
+          DEInfix name_ ->
+            do  external <- findDefinitionForInfixInImports state details imports_ name_
+
+                maybe (Task.throw $ DefinitionExitNotFound entity) return $
+                  fmap (\(a, b, c) -> (a, b, fmap FoundInfix c)) external
+
           _ ->
             Task.throw $ DefinitionExitNotFound entity
 
@@ -685,11 +692,10 @@ findDefinitionForLowVarQualInImports ::
 findDefinitionForLowVarQualInImports state details imports qual name =
   let
     potentialSources =
-      foldr
-        (\import_@(Src.Import iName iAlias iExposing) acc ->
-          if A.toValue iName == qual || Just qual == iAlias then import_ : acc else acc
+      filter
+        (\import_@(Src.Import iName iAlias iExposing) ->
+          A.toValue iName == qual || Just qual == iAlias
         )
-        []
         imports
   in
   foldr
@@ -711,20 +717,18 @@ findDefinitionForLowVarInImports ::
 findDefinitionForLowVarInImports state details imports name =
   let
     potentialSources =
-      foldr
-        (\import_@(Src.Import iName iAlias iExposing) acc ->
+      filter
+        (\import_@(Src.Import iName iAlias iExposing) ->
           case iExposing of
-            Src.Open -> import_ : acc
-            Src.Explicit exposed -> foldr (\exposed _ ->
+            Src.Open -> True
+            Src.Explicit exposed -> any (\exposed ->
                 case exposed of
-                  Src.Lower (A.At _ name_) -> if name_ == name then [import_] else acc
-                  Src.Upper _ _ -> acc
-                  Src.Operator _ _ -> acc
+                  Src.Lower (A.At _ name_) -> name_ == name
+                  Src.Upper _ _ -> False
+                  Src.Operator _ _ -> False
               )
-              []
               exposed
         )
-        []
         imports
   in
   foldr
@@ -735,6 +739,76 @@ findDefinitionForLowVarInImports state details imports name =
     )
     (return Nothing)
     potentialSources
+
+
+findDefinitionForInfixInImports ::
+  State
+  -> Details.Details
+  -> [Src.Import]
+  -> Name
+  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Infix))
+findDefinitionForInfixInImports state details imports name =
+  let
+    potentialSources =
+      filter
+        (\import_@(Src.Import iName iAlias iExposing) ->
+          case iExposing of
+            Src.Open -> True
+            Src.Explicit exposed -> any (\exposed ->
+                case exposed of
+                  Src.Lower _ -> False
+                  Src.Upper _ _ -> False
+                  Src.Operator _ name_ -> name_ == name
+              )
+              exposed
+        )
+        imports
+  in
+  foldr
+    (\import_ acc ->
+      do  x <- findDefinitionForInfixInModule state details (Src.getImportName import_) name
+          y <- acc
+          return (x <|> y)
+    )
+    (return Nothing)
+    potentialSources
+
+
+findDefinitionForInfixInModule ::
+  State
+  -> Details.Details
+  -> ModuleName.Raw
+  -> Name
+  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Infix))
+findDefinitionForInfixInModule state details moduleName name =
+  do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+
+      (projectType, filePath) <-
+        Task.mio (DefinitionExitModuleNotFound moduleName) $
+          (do  let local = fmap (\a -> (Parse.Application, a)) (lookupModulePath details moduleName)
+               pkg <- fmap (\a -> (,) <$> fmap Parse.Package (lookupPkgName details moduleName) <*> a)
+                  (lookupPkgPath details moduleName)
+
+               return (local <|> pkg)
+          )
+
+      source <-
+        maybe (Task.io $ File.readUtf8 filePath) return $
+          (BSC.pack <$> Map.lookup filePath files)
+
+      (Src.Module _ _ _ _ _ _ _ binops _) <-
+        Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+          return (Parse.fromByteString projectType source)
+
+      let def =
+            foldr
+              (\infix_@(A.At _ (Src.Infix name_ _ _ _)) acc ->
+                if name_ == name then Just infix_ else acc
+              )
+              Nothing
+              binops
+
+      return (fmap (\a -> (filePath, moduleName, a)) def)
 
 
 findDefinitionForNameInModule ::
@@ -839,14 +913,16 @@ data DefinedEntity
   = DEVar [A.Located Src.Def] [Src.Pattern] Src.VarType Name
   | DEVarQual [A.Located Src.Def] [Src.Pattern] Src.VarType Name Name
   | DEAccess [A.Located Src.Def] [Src.Pattern] Src.Expr Name
+  | DEInfix Name
 
 
 definedEntityToStr :: DefinedEntity -> String
 definedEntityToStr entity =
   case entity of
-    DEVar _ _ _ name -> Name.toChars name
-    DEVarQual _ _ _ prefix name -> Name.toChars prefix ++ "." ++ Name.toChars name
-    DEAccess _ _ record field -> "." ++ Name.toChars field
+    DEVar _ _ _ name -> Name.toChars name ++ " (Var)"
+    DEVarQual _ _ _ prefix name -> Name.toChars prefix ++ "." ++ Name.toChars name ++ " (VarQual)"
+    DEAccess _ _ record field -> "." ++ Name.toChars field ++ " (Access)"
+    DEInfix name -> Name.toChars name ++ " (Infix)"
 
 
 findDefinedEntityInValues :: A.Position -> Src.Module -> Maybe DefinedEntity
@@ -906,8 +982,8 @@ findDefinedEntityInExpr position defs patterns expr =
         Nothing
         exprs
 
-    Src.Op _ ->
-      Nothing
+    Src.Op name ->
+      Just $ DEInfix name
 
     Src.Negate expr ->
       if isInRegion position (A.toRegion expr) then
@@ -920,9 +996,11 @@ findDefinedEntityInExpr position defs patterns expr =
         findDefinedEntityInExpr position defs patterns (A.toValue final)
       else
         foldr
-          (\a acc ->
-            if isInRegion position (A.toRegion (fst a)) then
-              findDefinedEntityInExpr position defs patterns (A.toValue (fst a))
+          (\(expr_, op) acc ->
+            if isInRegion position (A.toRegion op) then
+              Just $ DEInfix (A.toValue op)
+            else if isInRegion position (A.toRegion expr_) then
+              findDefinedEntityInExpr position defs patterns (A.toValue expr_)
             else
               acc
           )
@@ -1090,9 +1168,12 @@ findReferences state filePath position =
                           (fmap BSC.pack $ Map.lookup modulePath files)
 
                       let projectType =
-                            case Details._outline details of
-                              Details.ValidApp _ -> Parse.Application
-                              Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
+                              Maybe.fromMaybe
+                                (case Details._outline details of
+                                  Details.ValidApp _ -> Parse.Application
+                                  Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
+                                )
+                                (fmap (\name -> Parse.Package name) (lookupPkgName details moduleName))
 
                       srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
                         Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
@@ -1136,6 +1217,7 @@ findReferences state filePath position =
 
                 _ -> return []
 
+
 isExposed :: Src.Import -> Name -> Bool
 isExposed (Src.Import _ _ Src.Open) name = True
 isExposed (Src.Import _ _ (Src.Explicit exposing)) name =
@@ -1147,6 +1229,7 @@ isExposed (Src.Import _ _ (Src.Explicit exposing)) name =
         Src.Operator _ _ -> False
     )
     exposing
+
 
 importersOf :: Details.Details -> ModuleName.Raw -> Set.Set ModuleName.Raw
 importersOf details targetModule =
