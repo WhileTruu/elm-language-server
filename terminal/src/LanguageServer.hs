@@ -578,7 +578,7 @@ findDefinition ::
   State
   -> FilePath
   -> A.Position
-  -> Task.Task DefinitionExit (FilePath, ModuleName.Raw, Found)
+  -> Task.Task DefinitionExit (FilePath, Src.Module, Found)
 findDefinition state filePath position =
   Task.eio id $ BW.withScope $ \scope -> Task.run $
   do  maybeRoot <- Task.io $ Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
@@ -589,56 +589,43 @@ findDefinition state filePath position =
         Just root ->
           Task.eio id $ Stuff.withRootLock root $ Task.run $
 
-          do  details <-
-                Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
+          do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
+              src <- loadSrcModuleByPath state details filePath
 
-              findDefinition_ state details filePath position
+              findDefinition__ state details filePath src position
 
 
-findDefinition_ ::
+
+findDefinition__ ::
   State
   -> Details.Details
   -> FilePath
+  -> Src.Module
   -> A.Position
-  -> Task.Task DefinitionExit (FilePath, ModuleName.Raw, Found)
-findDefinition_ state details filePath position =
-    do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
-
-        source <-
-          maybe (Task.io $ File.readUtf8 filePath) return $
-            (fmap BSC.pack $ Map.lookup filePath files)
-
-        let projectType =
-              case Details._outline details of
-                Details.ValidApp _ -> Parse.Application
-                Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
-
-        srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
-          Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-            return (Parse.fromByteString projectType source)
-
-        entity <- maybe (Task.throw DefinitionExitNoDefinedEntity) return $
-          findDefinedEntityInValues position srcModule
+  -> Task.Task DefinitionExit (FilePath, Src.Module, Found)
+findDefinition__ state details path src position =
+    do  entity <- maybe (Task.throw DefinitionExitNoDefinedEntity) return $
+          findDefinedEntityInValues position src
 
         let row = ((\(A.Position row _) -> row) position)
 
         case entity of
           DEVar defs patterns Src.LowVar name ->
-            do  let local = fmap (\a -> (filePath, Src.getName srcModule, a)) $
-                              findDefinitionForLowVarLocally srcModule defs patterns name
-                external <- findDefinitionForLowVarInImports state details imports_ name
+            do  let local = fmap (\a -> (path, src, a)) $
+                              findDefinitionForLowVarLocally src defs patterns name
+                external <- findDefinitionForLowVarInImports state details (Src._imports src) name
 
                 maybe (Task.throw $ DefinitionExitNotFound entity) return $
                   local <|> fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) external
 
           DEVarQual _ _ Src.LowVar mod name ->
-            do  imported <- findDefinitionForLowVarQualInImports state details imports_ mod name
+            do  imported <- findDefinitionForLowVarQualInImports state details (Src._imports src) mod name
 
                 maybe (Task.throw $ DefinitionExitNotFound entity) return $
                   fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) imported
 
           DEInfix name_ ->
-            do  external <- findDefinitionForInfixInImports state details imports_ name_
+            do  external <- findDefinitionForInfixInImports state details (Src._imports src) name_
 
                 maybe (Task.throw $ DefinitionExitNotFound entity) return $
                   fmap (\(a, b, c) -> (a, b, fmap FoundInfix c)) external
@@ -688,7 +675,7 @@ findDefinitionForLowVarQualInImports ::
   -> [Src.Import]
   -> Name
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Value))
+  -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Value))
 findDefinitionForLowVarQualInImports state details imports qual name =
   let
     potentialSources =
@@ -713,7 +700,7 @@ findDefinitionForLowVarInImports ::
   -> Details.Details
   -> [Src.Import]
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Value))
+  -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Value))
 findDefinitionForLowVarInImports state details imports name =
   let
     potentialSources =
@@ -746,7 +733,7 @@ findDefinitionForInfixInImports ::
   -> Details.Details
   -> [Src.Import]
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Infix))
+  -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Infix))
 findDefinitionForInfixInImports state details imports name =
   let
     potentialSources =
@@ -779,26 +766,9 @@ findDefinitionForInfixInModule ::
   -> Details.Details
   -> ModuleName.Raw
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Infix))
+  -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Infix))
 findDefinitionForInfixInModule state details moduleName name =
-  do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
-
-      (projectType, filePath) <-
-        Task.mio (DefinitionExitModuleNotFound moduleName) $
-          (do  let local = fmap (\a -> (Parse.Application, a)) (lookupModulePath details moduleName)
-               pkg <- fmap (\a -> (,) <$> fmap Parse.Package (lookupPkgName details moduleName) <*> a)
-                  (lookupPkgPath details moduleName)
-
-               return (local <|> pkg)
-          )
-
-      source <-
-        maybe (Task.io $ File.readUtf8 filePath) return $
-          (BSC.pack <$> Map.lookup filePath files)
-
-      (Src.Module _ _ _ _ _ _ _ binops _) <-
-        Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-          return (Parse.fromByteString projectType source)
+  do  (path, src) <- loadSrcModule state details moduleName
 
       let def =
             foldr
@@ -806,9 +776,9 @@ findDefinitionForInfixInModule state details moduleName name =
                 if name_ == name then Just infix_ else acc
               )
               Nothing
-              binops
+              (Src._binops src)
 
-      return (fmap (\a -> (filePath, moduleName, a)) def)
+      return (fmap (\a -> (path, src, a)) def)
 
 
 findDefinitionForNameInModule ::
@@ -816,36 +786,12 @@ findDefinitionForNameInModule ::
   -> Details.Details
   -> ModuleName.Raw
   -> Name
-  -> Task.Task DefinitionExit (Maybe (FilePath, ModuleName.Raw, A.Located Src.Value))
+  -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Value))
 findDefinitionForNameInModule state details moduleName name =
-  do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+  do  (path, src) <- loadSrcModule state details moduleName
 
-      (projectType, filePath) <-
-        Task.mio (DefinitionExitModuleNotFound moduleName) $
-          (do  let local = fmap (\a -> (Parse.Application, a)) (lookupModulePath details moduleName)
-               pkg <- fmap (\a -> (,) <$> fmap Parse.Package (lookupPkgName details moduleName) <*> a)
-                  (lookupPkgPath details moduleName)
+      return (fmap (\a -> (path, src, a)) $ findLowVarDefinitionNamed name src)
 
-               return (local <|> pkg)
-          )
-
-      source <-
-        maybe (Task.io $ File.readUtf8 filePath) return $
-          (BSC.pack <$> Map.lookup filePath files)
-
-      -- Check if file contains the val at all before parsing, which is more
-      -- expensive if the file is massive.
-      -- TODO: do not parse for definition either? :D
-      let sourceContainsVal = any (BSC.isPrefixOf (BSC.pack (Name.toChars name ++ " "))) (BSC.lines source)
-
-      if sourceContainsVal then
-        do  srcModule <-
-              Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                return (Parse.fromByteString projectType source)
-
-            return (fmap (\a -> (filePath, moduleName, a)) $ findLowVarDefinitionNamed name srcModule)
-      else
-        return Nothing
 
 lookupPkgPath :: Details.Details -> ModuleName.Raw -> IO (Maybe FilePath)
 lookupPkgPath details moduleName =
@@ -1155,72 +1101,80 @@ findReferences state filePath position =
           do  details <-
                 Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
 
-              definition <- findDefinition_ state details filePath position
+              localSrc <- loadSrcModuleByPath state details filePath
+              definition <- findDefinition__ state details filePath localSrc position
 
               case definition of
-                (modulePath, moduleName, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) ->
-                  do  let importers = importersOf details moduleName
+                (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) ->
+                  do  let importers = importersOf details (Src.getName defSrc)
 
-                      files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
-
-                      source <-
-                        maybe (Task.io $ File.readUtf8 modulePath) return $
-                          (fmap BSC.pack $ Map.lookup modulePath files)
-
-                      let projectType =
-                              Maybe.fromMaybe
-                                (case Details._outline details of
-                                  Details.ValidApp _ -> Parse.Application
-                                  Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
-                                )
-                                (fmap (\name -> Parse.Package name) (lookupPkgName details moduleName))
-
-                      srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
-                        Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                          return (Parse.fromByteString projectType source)
-
-                      let localRefs = map (\a -> (modulePath, a))
-                            (varInModule (A.toValue name) srcModule)
+                      let localRefs = map (\a -> (modulePath, a)) (varInModule (A.toValue name) localSrc)
 
                       foldr
                         (\a acc ->
-                          do  path <- Task.mio (DefinitionExitModuleNotFound a) $
-                                        return (lookupModulePath details a)
-
-                              source <-
-                                maybe (Task.io $ File.readUtf8 path) return $
-                                  (fmap BSC.pack $ Map.lookup path files)
-
-                              let projectType =
-                                    case Details._outline details of
-                                      Details.ValidApp _ -> Parse.Application
-                                      Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
-
-                              srcModule@(Src.Module _ _ _ imports_ _ _ _ _ _) <-
-                                Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                                  return (Parse.fromByteString projectType source)
+                          do  (importerPath, importerSrc) <- loadSrcModule state details a
 
                               foundRefs <- acc
 
-                              let newRefs = case List.find (\(Src.Import name_ _ _) -> A.toValue name_ == moduleName) imports_ of
-                                              Just (import_@(Src.Import _ alias _)) ->
-                                                if isExposed import_ (A.toValue name)
-                                                  then varInModule (A.toValue name) srcModule
-                                                  else varQualInModule (Maybe.fromMaybe (Src.getImportName import_) alias) (A.toValue name) srcModule
+                              let newRefs =
+                                    case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports importerSrc) of
+                                      Just import_@(Src.Import _ alias _) ->
+                                        if isLowVarExposed import_ (A.toValue name)
+                                          then varInModule (A.toValue name) importerSrc
+                                          else varQualInModule (Maybe.fromMaybe (Src.getImportName import_) alias) (A.toValue name) importerSrc
 
-                                              Nothing -> []
+                                      Nothing -> []
 
-                              return (foundRefs ++ map (\a -> (path, a)) newRefs)
+                              return (foundRefs ++ map (\a -> (importerPath, a)) newRefs)
                         )
                         (return localRefs)
-                        (Set.toList importers)
+                        importers
 
-                _ -> return []
+                _ ->
+                  return []
 
 
-isExposed :: Src.Import -> Name -> Bool
-isExposed (Src.Import _ _ Src.Open) name = True
-isExposed (Src.Import _ _ (Src.Explicit exposing)) name =
+loadSrcModule :: State -> Details.Details -> ModuleName.Raw -> Task.Task DefinitionExit (FilePath, Src.Module)
+loadSrcModule state details moduleName =
+  do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+
+      (projectType, filePath) <-
+        Task.mio (DefinitionExitModuleNotFound moduleName) $
+          (do  let local = fmap (\a -> (Parse.Application, a)) (lookupModulePath details moduleName)
+               pkg <- fmap (\a -> (,) <$> fmap Parse.Package (lookupPkgName details moduleName) <*> a)
+                  (lookupPkgPath details moduleName)
+
+               return (local <|> pkg)
+          )
+
+      source <-
+        maybe (Task.io $ File.readUtf8 filePath) return $
+          (BSC.pack <$> Map.lookup filePath files)
+
+      Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+        return (fmap ((,) filePath) (Parse.fromByteString projectType source))
+
+
+loadSrcModuleByPath :: State -> Details.Details -> FilePath -> Task.Task DefinitionExit Src.Module
+loadSrcModuleByPath state details filePath =
+  do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+
+      source <-
+        maybe (Task.io $ File.readUtf8 filePath) return $
+          (fmap BSC.pack $ Map.lookup filePath files)
+
+      let projectType =
+            case Details._outline details of
+              Details.ValidApp _ -> Parse.Application
+              Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
+
+      Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+        return (Parse.fromByteString projectType source)
+
+
+isLowVarExposed :: Src.Import -> Name -> Bool
+isLowVarExposed (Src.Import _ _ Src.Open) name = True
+isLowVarExposed (Src.Import _ _ (Src.Explicit exposing)) name =
   any
     (\exposing_ ->
       case exposing_ of
@@ -1351,8 +1305,8 @@ varQualInExpr qual name foundRegions (A.At region expr_) =
         Src.Int _ -> foundRegions
         Src.Float _ -> foundRegions
         Src.Var _ varName -> foundRegions
-        Src.VarQual _ qual varName ->
-          if qual == qual && varName == name then region : foundRegions else foundRegions
+        Src.VarQual _ qual_ varName ->
+          if qual == qual_ && varName == name then region : foundRegions else foundRegions
         Src.List exprs -> List.foldl (varQualInExpr qual name) foundRegions exprs
         Src.Op opName -> foundRegions
         Src.Negate expr -> varQualInExpr qual name foundRegions expr
