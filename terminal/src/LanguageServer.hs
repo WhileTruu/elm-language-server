@@ -592,18 +592,18 @@ findDefinition state filePath position =
           do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
               src <- loadSrcModuleByPath state details filePath
 
-              findDefinition__ state details filePath src position
+              findDefinition_ state details filePath src position
 
 
 
-findDefinition__ ::
+findDefinition_ ::
   State
   -> Details.Details
   -> FilePath
   -> Src.Module
   -> A.Position
   -> Task.Task DefinitionExit (FilePath, Src.Module, Found)
-findDefinition__ state details path src position =
+findDefinition_ state details path src position =
     do  entity <- maybe (Task.throw DefinitionExitNoDefinedEntity) return $
           findDefinedEntityInValues position src
 
@@ -1102,7 +1102,7 @@ findReferences state filePath position =
                 Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
 
               localSrc <- loadSrcModuleByPath state details filePath
-              definition <- findDefinition__ state details filePath localSrc position
+              definition <- findDefinition_ state details filePath localSrc position
 
               case definition of
                 (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) ->
@@ -1122,6 +1122,31 @@ findReferences state filePath position =
                                         if isLowVarExposed import_ (A.toValue name)
                                           then varInModule (A.toValue name) importerSrc
                                           else varQualInModule (Maybe.fromMaybe (Src.getImportName import_) alias) (A.toValue name) importerSrc
+
+                                      Nothing -> []
+
+                              return (foundRefs ++ map (\a -> (importerPath, a)) newRefs)
+                        )
+                        (return localRefs)
+                        importers
+
+                (modulePath, defSrc, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
+                  do  let importers = importersOf details (Src.getName defSrc)
+
+                      let localRefs = map (\a -> (modulePath, a)) (infixInModule name localSrc)
+
+                      foldr
+                        (\a acc ->
+                          do  (importerPath, importerSrc) <- loadSrcModule state details a
+
+                              foundRefs <- acc
+
+                              let newRefs =
+                                    case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports importerSrc) of
+                                      Just import_@(Src.Import _ alias _) ->
+                                        if isInfixExposed import_ name
+                                          then infixInModule name importerSrc
+                                          else []
 
                                       Nothing -> []
 
@@ -1185,6 +1210,19 @@ isLowVarExposed (Src.Import _ _ (Src.Explicit exposing)) name =
     exposing
 
 
+isInfixExposed :: Src.Import -> Name -> Bool
+isInfixExposed (Src.Import _ _ Src.Open) name = True
+isInfixExposed (Src.Import _ _ (Src.Explicit exposing)) name =
+  any
+    (\exposing_ ->
+      case exposing_ of
+        Src.Lower (A.At _ name_) -> False
+        Src.Upper _ _ -> False
+        Src.Operator _ name_ -> name == name_
+    )
+    exposing
+
+
 importersOf :: Details.Details -> ModuleName.Raw -> Set.Set ModuleName.Raw
 importersOf details targetModule =
   let locals = Details._locals details
@@ -1218,24 +1256,19 @@ varInExpr name foundRegions (A.At region expr_) =
         Src.Var _ varName -> if varName == name then region : foundRegions else foundRegions
         Src.VarQual _ qual varName -> foundRegions
         Src.List exprs -> List.foldl (varInExpr name) foundRegions exprs
-        Src.Op opName ->
-          -- FIXME: should op be here?
-          if opName == name then region : foundRegions else foundRegions
+        Src.Op _ -> foundRegions
         Src.Negate expr -> varInExpr name foundRegions expr
-
         Src.Binops exprsAndNames expr ->
             List.foldl
                 (\foundRegions (expr_, _) -> varInExpr name foundRegions expr_)
                 (varInExpr name foundRegions expr)
                 exprsAndNames
-
         Src.Lambda patterns expr -> varInExpr name foundRegions expr
         Src.Call expr exprs ->
             List.foldl
                 (varInExpr name)
                 (varInExpr name foundRegions expr)
                 exprs
-
         Src.If listTupleExprs expr ->
             List.foldl
                 (\foundRegions (one, two) ->
@@ -1243,7 +1276,6 @@ varInExpr name foundRegions (A.At region expr_) =
                 )
                 (varInExpr name foundRegions expr)
                 listTupleExprs
-
         Src.Let defs expr ->
             List.foldl
                 (\foundRegions (A.At _ def_) ->
@@ -1256,7 +1288,6 @@ varInExpr name foundRegions (A.At region expr_) =
                 )
                 (varInExpr name foundRegions expr)
                 defs
-
         Src.Case expr branches ->
             List.foldl
                 (\foundRegions (pattern, branchExpr) ->
@@ -1264,22 +1295,18 @@ varInExpr name foundRegions (A.At region expr_) =
                 )
                 (varInExpr name foundRegions expr)
                 branches
-
         Src.Accessor _ -> foundRegions
         Src.Access expr _ -> varInExpr name foundRegions expr
-
         Src.Update _ fields ->
             List.foldl
                 (\foundRegions (_, fieldExpr) -> varInExpr name foundRegions fieldExpr)
                 foundRegions
                 fields
-
         Src.Record fields ->
             List.foldl
                 (\foundRegions (_, fieldExpr) -> varInExpr name foundRegions fieldExpr)
                 foundRegions
                 fields
-
         Src.Unit -> foundRegions
         Src.Tuple exprA exprB exprs ->
             List.foldl (varInExpr name)
@@ -1308,21 +1335,19 @@ varQualInExpr qual name foundRegions (A.At region expr_) =
         Src.VarQual _ qual_ varName ->
           if qual == qual_ && varName == name then region : foundRegions else foundRegions
         Src.List exprs -> List.foldl (varQualInExpr qual name) foundRegions exprs
-        Src.Op opName -> foundRegions
+        Src.Op _ -> foundRegions
         Src.Negate expr -> varQualInExpr qual name foundRegions expr
         Src.Binops exprsAndNames expr ->
             List.foldl
                 (\foundRegions (expr_, _) -> varQualInExpr qual name foundRegions expr_)
                 (varQualInExpr qual name foundRegions expr)
                 exprsAndNames
-
         Src.Lambda patterns expr -> varQualInExpr qual name foundRegions expr
         Src.Call expr exprs ->
             List.foldl
                 (varQualInExpr qual name)
                 (varQualInExpr qual name foundRegions expr)
                 exprs
-
         Src.If listTupleExprs expr ->
             List.foldl
                 (\foundRegions (one, two) ->
@@ -1330,7 +1355,6 @@ varQualInExpr qual name foundRegions (A.At region expr_) =
                 )
                 (varQualInExpr qual name foundRegions expr)
                 listTupleExprs
-
         Src.Let defs expr ->
             List.foldl
                 (\foundRegions (A.At _ def_) ->
@@ -1343,7 +1367,6 @@ varQualInExpr qual name foundRegions (A.At region expr_) =
                 )
                 (varInExpr name foundRegions expr)
                 defs
-
         Src.Case expr branches ->
             List.foldl
                 (\foundRegions (pattern, branchExpr) ->
@@ -1351,27 +1374,100 @@ varQualInExpr qual name foundRegions (A.At region expr_) =
                 )
                 (varQualInExpr qual name foundRegions expr)
                 branches
-
         Src.Accessor _ -> foundRegions
         Src.Access expr _ -> varQualInExpr qual name foundRegions expr
-
         Src.Update _ fields ->
             List.foldl
                 (\foundRegions (_, fieldExpr) -> varQualInExpr qual name foundRegions fieldExpr)
                 foundRegions
                 fields
-
         Src.Record fields ->
             List.foldl
                 (\foundRegions (_, fieldExpr) -> varQualInExpr qual name foundRegions fieldExpr)
                 foundRegions
                 fields
-
         Src.Unit -> foundRegions
         Src.Tuple exprA exprB exprs ->
             List.foldl (varQualInExpr qual name) foundRegions (exprA : exprB : exprs)
         Src.Shader _ _ -> foundRegions
 
+infixInModule :: Name -> Src.Module -> [A.Region]
+infixInModule name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
+    List.concatMap
+      (\(A.At _ (Src.Value _ _ expr _)) ->
+        infixInExpr name [] expr
+      )
+      values
+
+
+infixInExpr :: Name -> [A.Region] -> Src.Expr -> [A.Region]
+infixInExpr name foundRegions (A.At region expr_) =
+    case expr_ of
+        Src.Chr _ -> foundRegions
+        Src.Str _ -> foundRegions
+        Src.Int _ -> foundRegions
+        Src.Float _ -> foundRegions
+        Src.Var _ _ -> foundRegions
+        Src.VarQual _ _ _ -> foundRegions
+        Src.List exprs -> List.foldl (infixInExpr name) foundRegions exprs
+        Src.Op opName -> if opName == name then region : foundRegions else foundRegions
+        Src.Negate expr -> infixInExpr  name foundRegions expr
+        Src.Binops exprsAndNames expr ->
+            List.foldl
+                (\foundRegions (expr_, (A.At region name_)) -> 
+                  if name == name_ then 
+                    infixInExpr name (region : foundRegions) expr_
+                  else
+                    infixInExpr name foundRegions expr_
+                )
+                (infixInExpr name foundRegions expr)
+                exprsAndNames
+        Src.Lambda patterns expr -> infixInExpr name foundRegions expr
+        Src.Call expr exprs -> List.foldl (infixInExpr name) (infixInExpr name foundRegions expr) exprs
+        Src.If listTupleExprs expr ->
+            List.foldl
+                (\foundRegions (one, two) ->
+                    infixInExpr name (infixInExpr name foundRegions one) two
+                )
+                (infixInExpr name foundRegions expr)
+                listTupleExprs
+        Src.Let defs expr ->
+            List.foldl
+                (\foundRegions (A.At _ def_) ->
+                    case def_ of
+                        Src.Define (A.At _ name_) _ expr_ _ ->
+                            infixInExpr name foundRegions expr_
+
+                        Src.Destruct pattern expr_ ->
+                            infixInExpr name foundRegions expr_
+                )
+                (infixInExpr name foundRegions expr)
+                defs
+        Src.Case expr branches ->
+            List.foldl
+                (\foundRegions (pattern, branchExpr) ->
+                    infixInExpr name (infixInExpr name foundRegions branchExpr) expr
+                )
+                (varInExpr name foundRegions expr)
+                branches
+        Src.Accessor _ -> foundRegions
+        Src.Access expr _ -> infixInExpr name foundRegions expr
+        Src.Update _ fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) -> infixInExpr name foundRegions fieldExpr)
+                foundRegions
+                fields
+        Src.Record fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) -> infixInExpr name foundRegions fieldExpr)
+                foundRegions
+                fields
+        Src.Unit -> foundRegions
+        Src.Tuple exprA exprB exprs ->
+            List.foldl (infixInExpr name)
+                foundRegions
+                (exprA : exprB : exprs)
+        Src.Shader _ _ -> foundRegions
 
 -- PACKAGE
 
