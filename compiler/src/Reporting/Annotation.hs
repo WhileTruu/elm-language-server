@@ -17,7 +17,7 @@ module Reporting.Annotation
 
 import Prelude hiding (traverse)
 import Control.Monad (liftM2)
-import Data.Binary (Binary, get, put)
+import Data.Binary (Binary, get, put, Get)
 import Data.Word (Word16, Word32)
 
 
@@ -99,5 +99,5 @@ instance Binary Region where
 
 
 instance Binary Position where
-  put (Position a b) = put a >> put b
-  get = liftM2 Position get get
+  put (Position a b) = put (fromIntegral a :: Word16) >> put b
+  get = liftM2 Position (fmap fromIntegral (get :: Get Word16) :: Get Word32) get
