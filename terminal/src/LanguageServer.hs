@@ -59,7 +59,7 @@ import qualified Elm.ModuleName as ModuleName
 import qualified BackgroundWriter as BW
 
 newtype State = State
-  { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath String)
+  { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
   }
 
 
@@ -141,7 +141,7 @@ run = do
                               let filePath :: FilePath
                                   filePath = drop 7 uri
 
-                              text <- textDocument .: "text" :: Aeson.Parser String
+                              text <- textDocument .: "text" >>= (pure . BS.pack)
 
                               return (version, filePath, text)
                         ) =<< Aeson.eitherDecode body
@@ -195,7 +195,7 @@ run = do
                               let filePath :: FilePath
                                   filePath = drop 7 uri
 
-                              changes <- mapM parseTextDocumentContentChangeEvent =<< params .: "contentChanges" :: Aeson.Parser [((A.Position, A.Position), String)]
+                              changes <- mapM parseTextDocumentContentChangeEvent =<< params .: "contentChanges" :: Aeson.Parser [((A.Position, A.Position), BS.ByteString)]
 
                               return (version, filePath, changes)
                         ) =<< Aeson.eitherDecode body
@@ -336,34 +336,34 @@ parseRange =
         return (start, end)
 
 
-parseTextDocumentContentChangeEvent :: Aeson.Value -> Aeson.Parser ((A.Position, A.Position), String)
+parseTextDocumentContentChangeEvent :: Aeson.Value -> Aeson.Parser ((A.Position, A.Position), BS.ByteString)
 parseTextDocumentContentChangeEvent =
   Aeson.withObject "TextDocumentContentChangeEvent" $ \obj ->
     do  range <- parseRange =<< obj .: "range"
-        text <- obj .: "text"
+        text <- obj .: "text" >>= (pure . BS.pack)
 
         return (range, text)
 
 
-applyChanges :: [((A.Position, A.Position), String)] -> String -> String
+applyChanges :: [((A.Position, A.Position), BS.ByteString)] -> BS.ByteString -> BS.ByteString
 applyChanges changes content =
   List.foldl' (\acc ((start, end), newText) -> applyChange acc start end newText) content changes
 
 
-applyChange :: String -> A.Position -> A.Position -> String -> String
+applyChange :: BS.ByteString -> A.Position -> A.Position -> BS.ByteString -> BS.ByteString
 applyChange content (A.Position sr sc) (A.Position er ec) newText =
-  let lines_ = lines content
+  let lines_ = BSC.lines content
       (before, rest) = splitAt (fromIntegral sr - 1) lines_
       (startTargetLine:afterStart) = rest
 
       endRest = drop (fromIntegral er - fromIntegral sr) rest
       (endTargetLine:afterEnd) = endRest
 
-      (start, _) = splitAt (fromIntegral sc - 1) startTargetLine
-      (_, end) = splitAt (fromIntegral ec - 1) endTargetLine
+      (start, _) = BSC.splitAt (fromIntegral sc - 1) startTargetLine
+      (_, end) = BSC.splitAt (fromIntegral ec - 1) endTargetLine
 
-      updatedLine = start ++ newText ++ end
-  in unlines $ before ++ (updatedLine : afterEnd)
+      updatedLine = BS.concat [ start, newText, end ]
+  in BSC.unlines $ before ++ (updatedLine : afterEnd)
 
 
 readHeader :: IO Int
@@ -1174,7 +1174,7 @@ loadSrcModule state details moduleName =
 
       source <-
         maybe (Task.io $ File.readUtf8 filePath) return $
-          (BSC.pack <$> Map.lookup filePath files)
+          Map.lookup filePath files
 
       Task.eio (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
         return (fmap ((,) filePath) (Parse.fromByteString projectType source))
@@ -1186,7 +1186,7 @@ loadSrcModuleByPath state details filePath =
 
       source <-
         maybe (Task.io $ File.readUtf8 filePath) return $
-          (fmap BSC.pack $ Map.lookup filePath files)
+          Map.lookup filePath files
 
       let projectType =
             case Details._outline details of
