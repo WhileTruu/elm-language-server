@@ -520,7 +520,7 @@ data DefinitionExit
   | DefinitionExitNoRoot
   | DefinitionExitNotFound DefinedEntity
   | DefinitionExitNoDefinedEntity
-  | DefinitionExitModuleNotFound ModuleName.Raw
+  | DefinitionExitModuleNotFound FilePath ModuleName.Raw
   | DefinitionExitNoProperModName DefinedEntity
 
 
@@ -553,9 +553,9 @@ definitionExitToReport path exit =
         "I tried to find a defined entity under the cursor, but could not."
         []
 
-    DefinitionExitModuleNotFound moduleName ->
+    DefinitionExitModuleNotFound root moduleName ->
       Reporting.Exit.Help.report "NO FILE FOR MODULE" Nothing
-        ("I tried to find the file for " ++ ModuleName.toChars moduleName ++ ", but failed to find it.")
+        ("I tried to find the file for " ++ ModuleName.toChars moduleName ++ ", but failed to find it in " ++ root ++ ".")
         []
 
     DefinitionExitNoProperModName entity ->
@@ -592,7 +592,7 @@ findDefinition state filePath position =
           do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
               src <- loadSrcModuleByPath state details filePath
 
-              findDefinition_ state details filePath src position
+              findDefinition_ state details root filePath src position
 
 
 
@@ -600,10 +600,11 @@ findDefinition_ ::
   State
   -> Details.Details
   -> FilePath
+  -> FilePath
   -> Src.Module
   -> A.Position
   -> Task.Task DefinitionExit (FilePath, Src.Module, Found)
-findDefinition_ state details path src position =
+findDefinition_ state details root path src position =
     do  entity <- maybe (Task.throw DefinitionExitNoDefinedEntity) return $
           findDefinedEntityInValues position src
 
@@ -613,19 +614,23 @@ findDefinition_ state details path src position =
           DEVar defs patterns Src.LowVar name ->
             do  let local = fmap (\a -> (path, src, a)) $
                               findDefinitionForLowVarLocally src defs patterns name
-                external <- findDefinitionForLowVarInImports state details (Src._imports src) name
+                -- FIXME: the <|> thing doesn't work here actually, not lazy eval.
+                -- external is actually evaluated and will cause the rest of the task to fail!
+                --
+                -- edit: a day or so later, I don't know what this means anymore. How would I test it?
+                external <- findDefinitionForLowVarInImports state details root (Src._imports src) name
 
                 maybe (Task.throw $ DefinitionExitNotFound entity) return $
                   local <|> fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) external
 
           DEVarQual _ _ Src.LowVar mod name ->
-            do  imported <- findDefinitionForLowVarQualInImports state details (Src._imports src) mod name
+            do  imported <- findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name
 
                 maybe (Task.throw $ DefinitionExitNotFound entity) return $
                   fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) imported
 
           DEInfix name_ ->
-            do  external <- findDefinitionForInfixInImports state details (Src._imports src) name_
+            do  external <- findDefinitionForInfixInImports state details root (Src._imports src) name_
 
                 maybe (Task.throw $ DefinitionExitNotFound entity) return $
                   fmap (\(a, b, c) -> (a, b, fmap FoundInfix c)) external
@@ -672,11 +677,12 @@ findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns
 findDefinitionForLowVarQualInImports ::
   State
   -> Details.Details
+  -> FilePath
   -> [Src.Import]
   -> Name
   -> Name
   -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Value))
-findDefinitionForLowVarQualInImports state details imports qual name =
+findDefinitionForLowVarQualInImports state details root imports qual name =
   let
     potentialSources =
       filter
@@ -687,7 +693,7 @@ findDefinitionForLowVarQualInImports state details imports qual name =
   in
   foldr
     (\import_ acc ->
-      do  x <- findDefinitionForNameInModule state details (Src.getImportName import_) name
+      do  x <- findDefinitionForNameInModule state details root (Src.getImportName import_) name
           y <- acc
           return (x <|> y)
     )
@@ -698,10 +704,11 @@ findDefinitionForLowVarQualInImports state details imports qual name =
 findDefinitionForLowVarInImports ::
   State
   -> Details.Details
+  -> FilePath
   -> [Src.Import]
   -> Name
   -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Value))
-findDefinitionForLowVarInImports state details imports name =
+findDefinitionForLowVarInImports state details root imports name =
   let
     potentialSources =
       filter
@@ -720,7 +727,7 @@ findDefinitionForLowVarInImports state details imports name =
   in
   foldr
     (\import_ acc ->
-      do  x <- findDefinitionForNameInModule state details (Src.getImportName import_) name
+      do  x <- findDefinitionForNameInModule state details root (Src.getImportName import_) name
           y <- acc
           return (x <|> y)
     )
@@ -731,10 +738,11 @@ findDefinitionForLowVarInImports state details imports name =
 findDefinitionForInfixInImports ::
   State
   -> Details.Details
+  -> FilePath
   -> [Src.Import]
   -> Name
   -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Infix))
-findDefinitionForInfixInImports state details imports name =
+findDefinitionForInfixInImports state details root imports name =
   let
     potentialSources =
       filter
@@ -753,7 +761,7 @@ findDefinitionForInfixInImports state details imports name =
   in
   foldr
     (\import_ acc ->
-      do  x <- findDefinitionForInfixInModule state details (Src.getImportName import_) name
+      do  x <- findDefinitionForInfixInModule state details root (Src.getImportName import_) name
           y <- acc
           return (x <|> y)
     )
@@ -764,11 +772,12 @@ findDefinitionForInfixInImports state details imports name =
 findDefinitionForInfixInModule ::
   State
   -> Details.Details
+  -> FilePath
   -> ModuleName.Raw
   -> Name
   -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Infix))
-findDefinitionForInfixInModule state details moduleName name =
-  do  (path, src) <- loadSrcModule state details moduleName
+findDefinitionForInfixInModule state details root moduleName name =
+  do  (path, src) <- loadSrcModule state details root moduleName
 
       let def =
             foldr
@@ -784,11 +793,12 @@ findDefinitionForInfixInModule state details moduleName name =
 findDefinitionForNameInModule ::
   State
   -> Details.Details
+  -> FilePath
   -> ModuleName.Raw
   -> Name
   -> Task.Task DefinitionExit (Maybe (FilePath, Src.Module, A.Located Src.Value))
-findDefinitionForNameInModule state details moduleName name =
-  do  (path, src) <- loadSrcModule state details moduleName
+findDefinitionForNameInModule state details root moduleName name =
+  do  (path, src) <- loadSrcModule state details root moduleName
 
       return (fmap (\a -> (path, src, a)) $ findLowVarDefinitionNamed name src)
 
@@ -1102,7 +1112,7 @@ findReferences state filePath position =
                 Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
 
               localSrc <- loadSrcModuleByPath state details filePath
-              definition <- findDefinition_ state details filePath localSrc position
+              definition <- findDefinition_ state details root filePath localSrc position
 
               case definition of
                 (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) ->
@@ -1112,7 +1122,7 @@ findReferences state filePath position =
 
                       foldr
                         (\a acc ->
-                          do  (importerPath, importerSrc) <- loadSrcModule state details a
+                          do  (importerPath, importerSrc) <- loadSrcModule state details root a
 
                               foundRefs <- acc
 
@@ -1137,7 +1147,7 @@ findReferences state filePath position =
 
                       foldr
                         (\a acc ->
-                          do  (importerPath, importerSrc) <- loadSrcModule state details a
+                          do  (importerPath, importerSrc) <- loadSrcModule state details root a
 
                               foundRefs <- acc
 
@@ -1159,12 +1169,12 @@ findReferences state filePath position =
                   return []
 
 
-loadSrcModule :: State -> Details.Details -> ModuleName.Raw -> Task.Task DefinitionExit (FilePath, Src.Module)
-loadSrcModule state details moduleName =
+loadSrcModule :: State -> Details.Details -> FilePath -> ModuleName.Raw -> Task.Task DefinitionExit (FilePath, Src.Module)
+loadSrcModule state details root moduleName =
   do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
 
       (projectType, filePath) <-
-        Task.mio (DefinitionExitModuleNotFound moduleName) $
+        Task.mio (DefinitionExitModuleNotFound root moduleName) $
           (do  let local = fmap (\a -> (Parse.Application, a)) (lookupModulePath details moduleName)
                pkg <- fmap (\a -> (,) <$> fmap Parse.Package (lookupPkgName details moduleName) <*> a)
                   (lookupPkgPath details moduleName)
