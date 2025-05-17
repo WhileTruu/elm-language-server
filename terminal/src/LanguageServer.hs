@@ -30,6 +30,7 @@ import qualified Data.Set as Set
 import qualified Data.NonEmptyList
 import qualified Data.OneOrMore as OneOrMore
 import qualified Data.Map
+import qualified Data.Either
 
 import qualified System.IO as IO
 import qualified System.Directory as Dir
@@ -753,7 +754,7 @@ findDefinition_ ::
 findDefinition_ state details root path src position =
     let entity =
           maybe (Left DefinitionExitNoDefinedEntity) (\a -> Right a) $
-            findDefinedEntityInValues position src
+            findDefinedEntityInValues position (Src._values src)
 
         row = ((\(A.Position row _) -> row) position)
 
@@ -1087,18 +1088,31 @@ definedEntityToStr entity =
     DEInfix name -> Name.toChars name ++ " (Infix)"
 
 
-findDefinedEntityInValues :: A.Position -> Src.Module -> Maybe DefinedEntity
-findDefinedEntityInValues position (Src.Module name exports docs imports values unions alias infixes effects) =
+findDefinedEntityInValues :: A.Position -> [A.Located Src.Value]-> Maybe DefinedEntity
+findDefinedEntityInValues position values =
   foldr
     (\located found ->
       case located of
-        A.At region (Src.Value _ patterns body _) ->
-          if isInRegion position region
+        A.At region (Src.Value name patterns body _) ->
+          if isPositionOnValueName position located
+            then Just (DEVar [] [] Src.LowVar (A.toValue name))
+          else if isInRegion position region
             then findDefinedEntityInExpr position [] patterns (A.toValue body)
             else found
     )
     Nothing
     values
+
+
+isPositionOnValueName :: A.Position -> A.Located Src.Value -> Bool
+isPositionOnValueName pos value =
+    let (A.At (A.Region (A.Position sx sy) _) (Src.Value name _ _ typeAnn)) = value
+        valNameLen = fromIntegral (length (Name.toChars (A.toValue name)))
+    in
+    isInRegion pos (A.toRegion name)
+      || (Maybe.isJust typeAnn
+           && isInRegion pos (A.Region (A.Position sx 0) (A.Position sx valNameLen))
+         )
 
 
 isInRegion :: A.Position -> A.Region -> Bool
