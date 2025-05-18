@@ -14,7 +14,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Time
 import qualified Data.Bifunctor
-
+import qualified Debug.Trace
 import Data.Foldable (foldrM)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -710,6 +710,9 @@ data Found_
   | FoundPattern Src.Pattern_
   | FoundDef Src.Def
   | FoundInfix Src.Infix
+  | FoundAlias Src.Alias
+  | FoundUnion Src.Union
+  | FoundVariant (A.Located Name, [Src.Type])
 
 
 findDefinition ::
@@ -797,6 +800,17 @@ findDefinition_ state details root path src position =
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
 
+      Right entity_@(DEVar _ _ Src.CapVar name) ->
+        do  let local = findDefinitionForCapVarLocally src name
+            external <- findDefinitionForCapVarInImports state details root (Src._imports src) name
+
+            return $
+              case (local, external) of
+                (Just a, _) -> Right (path, src, a)
+                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, c)) a
+                (Nothing, Left a) -> Left a
+                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
+
       Right entity_@(DEVarQual _ _ Src.LowVar mod name) ->
        fmap
          (\a -> a
@@ -816,6 +830,95 @@ findDefinition_ state details root path src position =
 
       Left exit ->
         return $ Left exit
+
+
+findDefinitionForCapVarLocally :: Src.Module -> Name -> Maybe Found
+findDefinitionForCapVarLocally src name =
+  let
+    inAliases =
+      foldr
+        (\(A.At _ alias@(Src.Alias (A.At region aliasName) _ _)) acc ->
+          if aliasName == name then Just (A.At region (FoundAlias alias)) else acc
+        )
+        Nothing
+        (Src._aliases src)
+
+    inUnions =
+      foldr
+        (\(A.At _ union@(Src.Union (A.At region unionName) _ variants)) acc ->
+          if unionName == name
+            then Just (A.At region (FoundUnion union))
+            else
+              foldr
+                (\a acc1 ->
+                  if A.toValue (fst a) == name
+                    then Just (A.At (A.toRegion (fst a)) (FoundVariant a))
+                    else acc1
+                )
+                acc
+                variants
+        )
+        Nothing
+        (Src._unions src)
+  in
+  inAliases <|> inUnions
+
+
+findDefinitionForCapVarInImports ::
+  State
+  -> Details.Details
+  -> FilePath
+  -> [Src.Import]
+  -> Name
+  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
+findDefinitionForCapVarInImports state details root imports name =
+  let
+    potentialSources =
+      filter
+        (\import_@(Src.Import iName iAlias iExposing) ->
+          case iExposing of
+            Src.Open -> True
+            Src.Explicit exposed -> any (\exposed ->
+                case exposed of
+                  Src.Lower _ -> False
+                  Src.Upper (A.At _ name_) Src.Private -> name_ == name
+                  Src.Upper _ _ -> True
+                  Src.Operator _ _ -> False
+              )
+              exposed
+        )
+        imports
+  in
+  foldr
+    (\import_ acc ->
+      do  x <- findDefinitionForCapVarInModule state details root (Src.getImportName import_) name
+          y <- acc
+
+          case (y, x) of
+            (Left _, x) -> return x
+            (Right Nothing, _) -> return x
+            (Right (Just _), _) -> return y
+    )
+    (return (Right Nothing))
+    potentialSources
+
+
+findDefinitionForCapVarInModule ::
+  State
+  -> Details.Details
+  -> FilePath
+  -> ModuleName.Raw
+  -> Name
+  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
+findDefinitionForCapVarInModule state details root moduleName name =
+  do  pathAndSrc <- loadSrcModule state details root moduleName
+
+      case pathAndSrc of
+        Right (path, src) ->
+          return $ Right $ fmap (\a -> (path, src, a)) $ findDefinitionForCapVarLocally src name
+
+        Left exit ->
+          return $ Left exit
 
 
 findDefinitionForLowVarLocally :: Src.Module -> [A.Located Src.Def] -> [Src.Pattern] -> Name -> Maybe Found
