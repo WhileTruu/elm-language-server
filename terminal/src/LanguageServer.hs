@@ -14,6 +14,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Time
 import qualified Data.Bifunctor
+import qualified Data.Functor
 import qualified Debug.Trace
 import Data.Foldable (foldrM)
 import qualified Data.ByteString as BS
@@ -800,6 +801,13 @@ findDefinition_ state details root path src position =
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
 
+      Right entity_@(DEVarQual _ _ Src.LowVar mod name) ->
+       fmap
+         (\a -> a
+           >>= fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
+         )
+         (findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name)
+
       Right entity_@(DEVar _ _ Src.CapVar name) ->
         do  let local = findDefinitionForCapVarLocally src name
             external <- findDefinitionForCapVarInImports state details root (Src._imports src) name
@@ -807,16 +815,13 @@ findDefinition_ state details root path src position =
             return $
               case (local, external) of
                 (Just a, _) -> Right (path, src, a)
-                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, c)) a
+                (Nothing, Right (Just a)) -> Right a
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
 
-      Right entity_@(DEVarQual _ _ Src.LowVar mod name) ->
-       fmap
-         (\a -> a
-           >>= fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
-         )
-         (findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name)
+      Right entity_@(DEVarQual _ _ Src.CapVar mod name) ->
+         findDefinitionForCapVarQualInImports state details root (Src._imports src) mod name
+         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound entity_)) Right)
 
       Right entity_@(DEInfix name_) ->
         fmap
@@ -919,6 +924,37 @@ findDefinitionForCapVarInModule state details root moduleName name =
 
         Left exit ->
           return $ Left exit
+
+
+findDefinitionForCapVarQualInImports ::
+  State
+  -> Details.Details
+  -> FilePath
+  -> [Src.Import]
+  -> Name
+  -> Name
+  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
+findDefinitionForCapVarQualInImports state details root imports qual name =
+  let
+    potentialSources =
+      filter
+        (\import_@(Src.Import iName iAlias iExposing) ->
+          A.toValue iName == qual || Just qual == iAlias
+        )
+        imports
+  in
+  foldr
+    (\import_ acc ->
+      do  x <- findDefinitionForCapVarInModule state details root (Src.getImportName import_) name
+          y <- acc
+
+          case (y, x) of
+            (Left _, x) -> return x
+            (Right Nothing, _) -> return x
+            (Right (Just _), _) -> return y
+    )
+    (return (Right Nothing))
+    potentialSources
 
 
 findDefinitionForLowVarLocally :: Src.Module -> [A.Located Src.Def] -> [Src.Pattern] -> Name -> Maybe Found
