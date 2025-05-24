@@ -91,7 +91,7 @@ import qualified Control.Monad
 
 import Data.Function ((&))
 
-import Data.Map ((!))
+
 
 data State = State
   { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
@@ -194,9 +194,7 @@ run = do
                           loop state
 
                     Right (version, filePath, text) ->
-                      do  let mVar = _changedFiles state
-
-                          Control.Concurrent.MVar.modifyMVar_ mVar $ \a ->
+                      do  Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
                             return $ Map.insert filePath text a
 
                           result <- diagnostics filePath []
@@ -209,11 +207,13 @@ run = do
                                   loop state
 
                             Right stuffs ->
-                              do  prev <- Control.Concurrent.MVar.readMVar (_prevPublishedDiagnosticsFiles state)
-                                  let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
-                                  mapM_ (\a -> publishReportDiagnostic a 1 []) diff
-                                  Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state)
-                                    (\a -> pure (map (\(a,_,_) -> a) stuffs))
+                              do  Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state) $
+                                    \prev ->
+                                      do  let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
+                                          mapM_ (\a -> publishReportDiagnostic a 1 []) diff
+
+                                          return (map (\(a,_,_) -> a) stuffs)
+
                                   mapM_
                                     (\(filePath, i, reports) ->
                                       publishReportDiagnostic filePath i reports
@@ -2034,64 +2034,60 @@ diagnostics filePath remain =
           return $ Left DiagnosticsExitNoRoot
 
         Just root ->
-          do  result <- build root (Data.NonEmptyList.List filePath remain)
+          do  result <-
+                Dir.withCurrentDirectory root $
+                  BW.withScope $ \scope -> Stuff.withRootLock root $
+                    Task.run $
+                      do  details <- Task.eio DiagnosticsExitBadDetails $ Details.load Reporting.silent scope root
+
+                          artifacts <- Task.eio DiagnosticsExitBadBuild $ Build.fromPaths Reporting.silent root details (Data.NonEmptyList.List filePath remain)
+
+                          return (artifacts, details)
 
               case result of
-                Right artifacts -> do
-                  fmap Right $ foldrM
-                    (\path acc -> do
+                Right (artifacts, details) ->
+                  fmap Right $ mapM
+                    (\path -> do
                       source <- File.readUtf8 path
-                      warnings <- warnings root path
+
+                      let projectType =
+                            case Details._outline details of
+                              Details.ValidApp _ -> Parse.Application
+                              Details.ValidPkg name _ _ -> (Parse.Package name)
+
+                      warnings <-  warnings projectType root path
 
                       case warnings of
                         Nothing ->
-                          return acc
+                          return $ ( path, 2, [] )
 
                         Just ( sourceMod, warns ) ->
-                          let
-                            warningToReport :: Reporting.Warning.Warning -> Reporting.Report.Report
-                            warningToReport =
-                              Reporting.Warning.toReport
-                                (Reporting.Render.Type.Localizer.fromModule sourceMod)
-                                (Code.toSource source)
-                          in
-                          return $ ( filePath, 2, map warningToReport warns ) : acc
+                          do  let warningToReport :: Reporting.Warning.Warning -> Reporting.Report.Report
+                                  warningToReport =
+                                    Reporting.Warning.toReport
+                                      (Reporting.Render.Type.Localizer.fromModule sourceMod)
+                                      (Code.toSource source)
+                              return $ ( path, 2, map warningToReport warns )
                     )
-                    []
                     (filePath : remain)
 
-                Left exit-> do
-                  case exit of
-                    DiagnosticsExitBadBuild buildProblem ->
-                      case Reporting.Exit.toBuildProblemReport buildProblem of
-                        Reporting.Exit.Help.CompilerReport filePath e es ->
-                          return $ Right $ map
-                            (\(Reporting.Error.Module name path _ source err) ->
-                              (
-                                path,
-                                1,
-                                Data.NonEmptyList.toList $
-                                  Reporting.Error.toReports (Code.toSource source) err
-                              )
-                            )
-                            (e : es)
+                Left (DiagnosticsExitBadBuild buildProblem) ->
+                  let (Reporting.Exit.Help.CompilerReport filePath e es) =
+                        Reporting.Exit.toBuildProblemReport buildProblem
+                  in
+                  return $ Right $ map
+                    (\(Reporting.Error.Module name path _ source err) ->
+                      (
+                        path,
+                        1,
+                        Data.NonEmptyList.toList $
+                          Reporting.Error.toReports (Code.toSource source) err
+                      )
+                    )
+                    (e : es)
 
-                        _ ->
-                          return $ Left exit
-
-
-                    _ ->
-                      return $ Left exit
-
-
-build :: FilePath -> Data.NonEmptyList.List FilePath -> IO (Either DiagnosticsExit Build.Artifacts)
-build root paths =
-  do  Dir.withCurrentDirectory root $
-        BW.withScope $ \scope -> Stuff.withRootLock root $
-          Task.run $
-            do  details <- Task.eio DiagnosticsExitBadDetails $ Details.load Reporting.silent scope root
-
-                Task.eio DiagnosticsExitBadBuild $ Build.fromPaths Reporting.silent root details paths
+                Left exit  ->
+                  return $ Left exit
 
 
 
@@ -2119,22 +2115,19 @@ data Artifacts =
 
 -- WARNINGS
 
+warnings :: Parse.ProjectType -> FilePath -> FilePath -> IO (Maybe (Src.Module, [ Reporting.Warning.Warning ]))
+warnings projectType root path =
+  do  loaded <- loadSingle projectType root path
 
-warnings :: FilePath -> FilePath -> IO (Maybe (Src.Module, [ Reporting.Warning.Warning ]))
-warnings root path = do
-    loaded <- loadSingle root path
+      let (Single source maybeWarnings interfaces canonical compiled) =
+            addAliasOptionsToWarnings $
+              addUnusedDeclarations $
+              addUnusedImports loaded
 
-    let (Single source maybeWarnings interfaces canonical compiled) =
-           addAliasOptionsToWarnings $
-             addUnusedDeclarations $
-             addUnusedImports loaded
+      return $ case source of
+        Right sourceMod -> Just (sourceMod, Maybe.fromMaybe [] maybeWarnings)
+        Left _ -> Nothing
 
-    let warnings =
-          case source of
-            Right sourceMod -> Just (sourceMod, Maybe.fromMaybe [] maybeWarnings)
-            Left _ -> Nothing
-
-    pure warnings
 
 
 {-
@@ -2142,11 +2135,11 @@ The below function also modifies the canonical AST by hydrating missing types.
 
 -}
 -- @TODO this is a disk mode function
-loadSingle :: FilePath -> FilePath -> IO SingleFileResult
-loadSingle root path =
+loadSingle :: Parse.ProjectType -> FilePath -> FilePath -> IO SingleFileResult
+loadSingle projectType root path =
   Dir.withCurrentDirectory root $
     do  source <- File.readUtf8 path
-        case Parse.fromByteString Parse.Application source of
+        case Parse.fromByteString projectType source of
           Right srcModule ->
             do  ifacesResult <- allInterfaces root (Data.NonEmptyList.List path [])
                 (Artifacts packageIfaces globalGraph) <- allPackageArtifacts root
@@ -2164,7 +2157,13 @@ loadSingle root path =
                     let ifaces = Map.union localIfaces packageIfaces
                         (canWarnings, eitherCanned) =
                           Reporting.Result.run $
-                            Canonicalize.Module.canonicalize Pkg.dummyName ifaces srcModule
+                            Canonicalize.Module.canonicalize
+                              (case projectType of
+                                  Parse.Application -> Pkg.dummyName
+                                  Parse.Package name -> name
+                              )
+                              ifaces
+                              srcModule
                     in
                     case eitherCanned of
                       Left errs ->
