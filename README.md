@@ -1,26 +1,19 @@
-# Elm
+# WhileTruu's Elm language server.
 
-A delightful language for reliable webapps.
+An experimental language server implementation for the Elm programming language.
 
-Check out the [Home Page](http://elm-lang.org/), [Try Online](http://elm-lang.org/try), or [The Official Guide](http://guide.elm-lang.org/)
+## Features
 
-
-<br>
+- Go to definition
+- Find references
+- Diagnostics (errors and warnings)
 
 ## Install
 
-✨ [Install](https://guide.elm-lang.org/install/elm.html) ✨
+### Prerequisites
 
-For multiple versions, previous versions, and uninstallation, see the instructions [here](https://github.com/elm/compiler/blob/master/installers/README.md).
+- GHC version `9.2.8`
+- Cabal version `3.10.3.0`
 
-<br>
-
-## Help
-
-If you are stuck, ask around on [the Elm slack channel][slack]. Folks are friendly and happy to help with questions!
-
-[slack]: http://elmlang.herokuapp.com/
-
-
-## Build 
-`cabal new-build --ghc-option=-split-sections` seems to work!
+### Build 
+`cabal new-build --ghc-option=-split-sections` seems to work! 
