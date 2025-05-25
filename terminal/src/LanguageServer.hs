@@ -761,6 +761,7 @@ findDefinition_ state details root path src position =
             findDefinedEntityInExports position (Src._exports src)
               <|> findDefinedEntityInValues position (Src._values src)
               <|> findDefinedEntityInAliases position (Src._aliases src)
+              <|> findDefinedEntityInUnions position (Src._unions src)
 
         row = ((\(A.Position row _) -> row) position)
     in
@@ -1263,7 +1264,7 @@ findDefinedEntityInExports pos exposing =
 findDefinedEntityInAliases :: A.Position -> [A.Located Src.Alias] -> Maybe DefinedEntity
 findDefinedEntityInAliases pos aliases =
   foldr
-    (\(A.At region (Src.Alias name vars type_)) found ->
+    (\(A.At region (Src.Alias name _ type_)) found ->
       let a =
             if isInRegion pos (A.toRegion name)
               then Just (DEVar [] [] Src.CapVar (A.toValue name))
@@ -1275,6 +1276,38 @@ findDefinedEntityInAliases pos aliases =
     )
     Nothing
     aliases
+
+
+findDefinedEntityInUnions :: A.Position -> [A.Located Src.Union] -> Maybe DefinedEntity
+findDefinedEntityInUnions pos unions =
+  foldr
+    (\(A.At region (Src.Union name _ variants)) found ->
+      let a =
+            if isInRegion pos (A.toRegion name)
+              then Just (DEVar [] [] Src.CapVar (A.toValue name))
+              else Nothing
+
+          b =
+            foldr
+              (\(name_, types) found_ ->
+                let a_ =
+                      if isInRegion pos (A.toRegion name_)
+                        then Just (DEVar [] [] Src.CapVar (A.toValue name_))
+                        else Nothing
+
+                    b_ =
+                      foldr (\a acc -> findDefinedEntityInType pos a <|> acc) Nothing types
+                in
+                a_ <|> b_ <|> found_
+
+              )
+              Nothing
+              variants
+      in
+      a <|> b <|> found
+    )
+    Nothing
+    unions
 
 
 findDefinedEntityInValues :: A.Position -> [A.Located Src.Value] -> Maybe DefinedEntity
