@@ -1,6 +1,10 @@
-# WhileTruu's Elm language server.
+# WhileTruu's Elm language server
 
 An experimental language server implementation for the Elm programming language.
+
+# Why?
+
+A language server should be *fast* and *reliable*. The Elm compiler is both of those things, a language server built from it might be as well.
 
 ## Features
 
@@ -17,3 +21,8 @@ An experimental language server implementation for the Elm programming language.
 
 ### Build 
 `cabal new-build --ghc-option=-split-sections` seems to work! 
+
+# Acknowledgements
+
+* [elm-tooling/elm-language-server](https://github.com/elm-tooling/elm-language-server)
+* [mdgriffith/elm-dev](https://github.com/mdgriffith/elm-dev)
