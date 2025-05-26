@@ -1,4 +1,4 @@
-# WhileTruu's Elm language server
+# 🚧 WhileTruu's Elm language server 🚧
 
 An experimental language server implementation for the Elm programming language.
 
@@ -6,11 +6,11 @@ An experimental language server implementation for the Elm programming language.
 
 A language server should be *fast* and *reliable*. The Elm compiler is both of those things, a language server built from it might be as well.
 
-## Features
+## Features ✨
 
-- Go to definition
-- Find references
-- Diagnostics (errors and warnings)
+- 🧭 Go to definition
+- 🔍 Find references
+- 🛡️ Diagnostics (errors and warnings)
 
 ## Install
 
