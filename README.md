@@ -24,5 +24,7 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 
 # Acknowledgements
 
+These projects were of a lot of help:
+
 * [elm-tooling/elm-language-server](https://github.com/elm-tooling/elm-language-server)
 * [mdgriffith/elm-dev](https://github.com/mdgriffith/elm-dev)
