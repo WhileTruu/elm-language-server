@@ -2210,19 +2210,21 @@ diagnostics filePath remain =
                     (filePath : remain)
 
                 Left (DiagnosticsExitBadBuild buildProblem) ->
-                  let (Reporting.Exit.Help.CompilerReport filePath e es) =
-                        Reporting.Exit.toBuildProblemReport buildProblem
-                  in
-                  return $ Right $ map
-                    (\(Reporting.Error.Module name path _ source err) ->
-                      (
-                        path,
-                        1,
-                        Data.NonEmptyList.toList $
-                          Reporting.Error.toReports (Code.toSource source) err
-                      )
-                    )
-                    (e : es)
+                  case Reporting.Exit.toBuildProblemReport buildProblem of
+                    (Reporting.Exit.Help.CompilerReport filePath e es) ->
+                      return $ Right $ map
+                        (\(Reporting.Error.Module name path _ source err) ->
+                          (
+                            path,
+                            1,
+                            Data.NonEmptyList.toList $
+                              Reporting.Error.toReports (Code.toSource source) err
+                          )
+                        )
+                        (e : es)
+
+                    _ ->
+                      return $ Left $ DiagnosticsExitBadBuild buildProblem
 
                 Left exit  ->
                   return $ Left exit
