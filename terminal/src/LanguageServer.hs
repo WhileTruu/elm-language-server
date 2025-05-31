@@ -26,12 +26,12 @@ import Data.Name (Name)
 import qualified Data.Name as Name
 import qualified Data.Map.Utils as Map
 import qualified Data.Map.Strict as Map
-import qualified Data.Utf8 as Utf8
 import qualified Data.Set as Set
 import qualified Data.NonEmptyList
 import qualified Data.OneOrMore as OneOrMore
 import qualified Data.Map
 import qualified Data.Either
+import qualified Data.ByteString.UTF8 as BS_UTF8
 
 import qualified System.IO as IO
 import qualified System.Directory as Dir
@@ -183,7 +183,7 @@ run = do
                               let filePath :: FilePath
                                   filePath = drop 7 uri
 
-                              text <- textDocument .: "text" >>= (pure . BSLC.toStrict . BSLC.pack)
+                              text <- textDocument .: "text" :: Aeson.Parser String
 
                               return (version, filePath, text)
                         ) =<< Aeson.eitherDecode body
@@ -195,7 +195,7 @@ run = do
 
                     Right (version, filePath, text) ->
                       do  Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
-                            return $ Map.insert filePath text a
+                            return $ Map.insert filePath (BS_UTF8.fromString text) a
 
                           result <- diagnostics filePath []
 
@@ -309,7 +309,9 @@ run = do
                               let filePath :: FilePath
                                   filePath = drop 7 uri
 
-                              changes <- mapM parseTextDocumentContentChangeEvent =<< params .: "contentChanges" :: Aeson.Parser [((A.Position, A.Position), BS.ByteString)]
+                              changes <-
+                                mapM parseTextDocumentContentChangeEvent =<<
+                                  params .: "contentChanges" :: Aeson.Parser [((A.Position, A.Position), String)]
 
                               return (version, filePath, changes)
                         ) =<< Aeson.eitherDecode body
@@ -450,23 +452,24 @@ parseRange =
         return (start, end)
 
 
-parseTextDocumentContentChangeEvent :: Aeson.Value -> Aeson.Parser ((A.Position, A.Position), BS.ByteString)
+parseTextDocumentContentChangeEvent :: Aeson.Value -> Aeson.Parser ((A.Position, A.Position), String)
 parseTextDocumentContentChangeEvent =
   Aeson.withObject "TextDocumentContentChangeEvent" $ \obj ->
     do  range <- parseRange =<< obj .: "range"
-        text <- obj .: "text" >>= (pure . BSLC.toStrict . BSLC.pack)
+        text <- obj .: "text" :: Aeson.Parser String
 
         return (range, text)
 
 
-applyChanges :: [((A.Position, A.Position), BS.ByteString)] -> BS.ByteString -> BS.ByteString
+applyChanges :: [((A.Position, A.Position), String)] -> BS.ByteString -> BS.ByteString
 applyChanges changes content =
   List.foldl' (\acc ((start, end), newText) -> applyChange acc start end newText) content changes
 
 
-applyChange :: BS.ByteString -> A.Position -> A.Position -> BS.ByteString -> BS.ByteString
-applyChange content (A.Position sr sc) (A.Position er ec) newText =
-  let lines_ = BSC.lines content
+applyChange :: BS.ByteString -> A.Position -> A.Position -> String -> BS.ByteString
+applyChange content (A.Position sr sc) (A.Position er ec) newTextStr =
+  let newText = BS_UTF8.fromString newTextStr
+      lines_ = BSC.lines content
       (before, rest) = splitAt (fromIntegral sr - 1) lines_
       (startTargetLine:afterStart) = rest
 
