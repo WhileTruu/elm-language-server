@@ -466,18 +466,25 @@ applyChanges changes content =
 applyChange :: BS.ByteString -> A.Position -> A.Position -> String -> BS.ByteString
 applyChange content (A.Position sr sc) (A.Position er ec) newTextStr =
   let newText = BS_UTF8.fromString newTextStr
-      lines_ = BSC.lines content
-      (before, rest) = splitAt (fromIntegral sr - 1) lines_
-      (startTargetLine:afterStart) = rest
+      lines_ = BSC.split '\n' content
+      ( before, rest ) = splitAt (fromIntegral sr - 1) lines_
+      ( startTargetLine, afterStart ) =
+        case rest of
+          a : b -> ( a, b )
+          [] -> ( BS.empty, [] )
 
       endRest = drop (fromIntegral er - fromIntegral sr) rest
-      (endTargetLine:afterEnd) = endRest
 
-      (start, _) = BSC.splitAt (fromIntegral sc - 1) startTargetLine
-      (_, end) = BSC.splitAt (fromIntegral ec - 1) endTargetLine
+      ( endTargetLine, afterEnd ) =
+        case endRest of
+          a : b -> ( a, b )
+          [] -> ( BS.empty, [] )
 
-      updatedLine = BS.concat [ start, newText, end ]
-  in BSC.unlines $ before ++ (updatedLine : afterEnd)
+      ( start, _ ) = BSC.splitAt (fromIntegral sc - 1) startTargetLine
+      ( _, end ) = BSC.splitAt (fromIntegral ec - 1) endTargetLine
+
+      updated = BS.concat [ start, newText, end ]
+  in BSC.intercalate (BS_UTF8.fromString "\n") $ before ++ (updated : afterEnd)
 
 
 readHeader :: IO Int
