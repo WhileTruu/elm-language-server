@@ -243,9 +243,6 @@ run = do
                     Right filePath ->
                       do  let mVar = _changedFiles state
 
-                          Control.Concurrent.MVar.modifyMVar_ mVar $ \a ->
-                            return $ Map.delete filePath a
-
                           result <- diagnostics filePath []
 
                           case result of
