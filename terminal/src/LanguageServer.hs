@@ -667,6 +667,7 @@ data DefinitionExit
   | DefinitionExitNotFound DefinedEntity
   | DefinitionExitNoDefinedEntity
   | DefinitionExitModuleNotFound FilePath ModuleName.Raw
+  | DefinitionExitNoFile FilePath
   | DefinitionExitNoProperModName DefinedEntity
 
 
@@ -703,6 +704,15 @@ definitionExitToReport path exit =
       Reporting.Exit.Help.report "NO FILE FOR MODULE" Nothing
         ("I tried to find the file for " ++ ModuleName.toChars moduleName ++ ", but failed to find it in " ++ root ++ ".")
         []
+
+    DefinitionExitNoFile path ->
+      Reporting.Exit.Help.report "NO FILE" Nothing
+        ("I tried to load a file from " ++ path ++ ", but it does not exist.")
+        [ Reporting.Doc.reflow $
+            "This often happens when there's nothing in the `~/.elm` folder.\
+            \ You can try deleting the `elm-stuff` folder and running `elm make`\
+            \ again to get the files to show up there."
+        ]
 
     DefinitionExitNoProperModName entity ->
       Reporting.Exit.Help.report "NO PROPER MODULE NAME" Nothing
@@ -1780,13 +1790,19 @@ loadSrcModule state details root moduleName =
 
       case projectTypeAndFilePath of
         Just (projectType, filePath) ->
-          do  source <-
-                maybe (File.readUtf8 filePath) return $
-                  Map.lookup filePath files
+          do  fileExists <- File.exists filePath
 
-              return $
-                Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                  (fmap ((,) filePath) (Parse.fromByteString projectType source))
+              if not fileExists then
+                return $ Left $ DefinitionExitNoFile filePath
+
+              else
+                do  source <-
+                      maybe (File.readUtf8 filePath) return $
+                        Map.lookup filePath files
+
+                    return $
+                      Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+                        (fmap ((,) filePath) (Parse.fromByteString projectType source))
 
         Nothing ->
           return $ Left $ DefinitionExitModuleNotFound root moduleName
