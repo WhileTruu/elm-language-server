@@ -22,7 +22,7 @@ compile and run this project without installing it or its build tools.
 First, run the following command to make sure your system is able to fetch and
 build everything. This could take a few minutes the first time you run it:
 
-    nix run https://github.com/WhileTruu/elm-language-server -- --help
+    nix run github:WhileTruu/elm-language-server -- --help
 
 You should see a bunch of activity as Nix downloads and builds things, and then
 a short message from the language server, like this:
@@ -38,13 +38,13 @@ IDE/editor's LSP integration use the language server:
 
 1. Configure your IDE to use this command for the Elm language server:
 
-       nix run https://github.com/WhileTruu/elm-language-server
+       nix run github:WhileTruu/elm-language-server
 
 2. For an editor that inherits environment from your command line, you can also
    start a sub-shell with `elm-language-server` available in `PATH`, and then
    start your editor from within that shell. For instance, by running:
 
-       nix shell https://github.com/WhileTruu/elm-language-server
+       nix shell github.com:WhileTruu/elm-language-server
        nvim ./src/Main.elm
 
    You may need to alter your settings to use `elm-language-server` as the
