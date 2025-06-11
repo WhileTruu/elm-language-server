@@ -3,13 +3,12 @@ Name: elm-language-server
 Version: 0.3
 
 Synopsis:
-    The `elm` command line interface.
+    Fork of the Elm compiler, repurposed for a language server.
 
 Description:
-    This includes commands like `elm make`, `elm repl`, and many others
-    for helping make Elm developers happy and productive.
+    An experimental language server implementation for the Elm programming language.
 
-Homepage: https://elm-lang.org
+Homepage: https://github.com/WhileTruu/elm-language-server
 
 License: BSD3
 License-file: LICENSE

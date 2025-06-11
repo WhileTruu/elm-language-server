@@ -1,0 +1,17 @@
+on:
+  pull_request:
+    branches:
+      - language-server
+  push:
+    branches:
+      - language-server
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Build with Nix
+        run: nix build .
