@@ -19,8 +19,6 @@ pkgs.haskell.packages.ghc96.override {
         maintainers = with lib.maintainers; [];
         mainProgram = "elm-language-server";
       }) (self.callPackage ./elm-language-server {});
-
-      elmVersion = elmPkgs.elm-language-server.version;
     };
   in
     elmPkgs
