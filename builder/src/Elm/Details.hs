@@ -10,6 +10,7 @@ module Elm.Details
   , loadObjects
   , loadInterfaces
   , verifyInstall
+  , downloadPackage
   )
   where
 

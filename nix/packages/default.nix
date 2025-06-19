@@ -19,6 +19,11 @@ pkgs.haskell.packages.ghc96.override {
         maintainers = with lib.maintainers; [];
         mainProgram = "elm-language-server";
       }) (self.callPackage ./elm-language-server {});
+
+      # Fix TLS issues
+      # see https://github.com/elm/compiler/pull/2325
+      # and https://discourse.elm-lang.org/t/elm-init-tls-issue/10231/11
+      tls = self.callPackage ./tls-1.9.0.nix { };
     };
   in
     elmPkgs

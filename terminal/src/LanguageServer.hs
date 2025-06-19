@@ -38,6 +38,7 @@ import qualified System.Directory as Dir
 
 import qualified File
 import qualified System.FilePath as Path
+import System.FilePath ((</>), (<.>))
 
 import qualified Stuff
 import qualified Build
@@ -91,6 +92,7 @@ import qualified Control.Monad
 
 import Data.Function ((&))
 
+import qualified Http
 
 
 data State = State
@@ -165,10 +167,6 @@ run = do
                                   ]
 
                           respond id response
-
-                          sendCreateWorkDoneProgress "initialization-progress"
-                          sendProgressBegin "initialization-progress" "Discovering projects"
-                          sendProgressEnd "initialization-progress" "Done"
 
                           loop state
 
@@ -669,6 +667,7 @@ data DefinitionExit
   | DefinitionExitModuleNotFound FilePath ModuleName.Raw
   | DefinitionExitNoFile FilePath
   | DefinitionExitNoProperModName DefinedEntity
+  | DefinitionExitBadDownload Pkg.Name Version.Version Reporting.Exit.PackageProblem
 
 
 definitionExitToReport :: FilePath -> DefinitionExit -> Reporting.Exit.Help.Report
@@ -718,6 +717,9 @@ definitionExitToReport path exit =
       Reporting.Exit.Help.report "NO PROPER MODULE NAME" Nothing
         ("I tried to find the definition for " ++ definedEntityToStr entity ++ ", but failed to find it.")
         []
+
+    DefinitionExitBadDownload pkg vsn packageProblem ->
+      Reporting.Exit.toPackageProblemReport pkg vsn packageProblem
 
 
 type Found = A.Located Found_
@@ -1186,28 +1188,6 @@ findDefinitionForNameInModule state details root moduleName name =
 
         Left exit ->
           return $ Left exit
-
-
-lookupPkgPath :: Details.Details -> ModuleName.Raw -> IO (Maybe FilePath)
-lookupPkgPath details moduleName =
-  case lookupPkgName details moduleName of
-    Nothing -> pure Nothing
-    Just pkgName ->
-      do  maybeCurrentVersion <- getPackageCurrentlyUsedOrLatestVersion "." pkgName
-
-          case maybeCurrentVersion of
-            Nothing -> pure Nothing
-            Just version ->
-              do  packageCache <- Stuff.getPackageCache
-                  let home = Stuff.package packageCache pkgName version
-                  let path = home Path.</> "src" Path.</> ModuleName.toFilePath moduleName Path.<.>"elm"
-
-                  return (Just path)
-
-
-lookupModulePath :: Details.Details -> ModuleName.Raw -> Maybe FilePath
-lookupModulePath details name =
-  fmap Details._path $ Map.lookup name $ Details._locals details
 
 
 lookupPkgName :: Details.Details -> ModuleName.Raw -> Maybe Pkg.Name
@@ -1764,48 +1744,86 @@ findReferences state filePath position =
 loadSrcModule :: State -> Details.Details -> FilePath -> ModuleName.Raw -> IO (Either DefinitionExit (FilePath, Src.Module))
 loadSrcModule state details root moduleName =
   do  files <- Control.Concurrent.MVar.readMVar (_changedFiles state)
+      let localPath = fmap Details._path $ Map.lookup moduleName $ Details._locals details
 
-      projectTypeAndFilePath <-
-        case Details._outline details of
-          Details.ValidApp _ ->
-            do  let local = lookupModulePath details moduleName
-                let pkgName = lookupPkgName details moduleName
+      case localPath of
+        Just local ->
+          do  let projectType =
+                    case Details._outline details of
+                      Details.ValidApp _ -> Parse.Application
+                      Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
 
-                pkg <- lookupPkgPath details moduleName
-
-                return
-                  ((fmap (\a -> (Parse.Application, a)) local)
-                    <|> ((,) <$> fmap Parse.Package pkgName <*> pkg)
-                  )
-
-          Details.ValidPkg pkgName _ _ ->
-            do  let local = lookupModulePath details moduleName
-                let pkgName_ = lookupPkgName details moduleName
-                pkg <- lookupPkgPath details moduleName
-
-                return
-                  ((fmap (\a -> (Parse.Package pkgName, a)) local)
-                    <|> ((,) <$> fmap Parse.Package pkgName_ <*> pkg)
-                  )
-
-      case projectTypeAndFilePath of
-        Just (projectType, filePath) ->
-          do  fileExists <- File.exists filePath
+              fileExists <- File.exists local
 
               if not fileExists then
-                return $ Left $ DefinitionExitNoFile filePath
+                return $ Left $ DefinitionExitNoFile local
 
               else
                 do  source <-
-                      maybe (File.readUtf8 filePath) return $
-                        Map.lookup filePath files
+                      maybe (File.readUtf8 local) return $
+                        Map.lookup local files
 
                     return $
                       Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                        (fmap ((,) filePath) (Parse.fromByteString projectType source))
+                        (fmap ((,) local) (Parse.fromByteString projectType source))
 
         Nothing ->
-          return $ Left $ DefinitionExitModuleNotFound root moduleName
+          do  let maybePkg = lookupPkgName details moduleName
+              maybeVsn <- case maybePkg of
+                            Just pkg -> getPackageCurrentlyUsedOrLatestVersion "." pkg
+                            Nothing -> return Nothing
+
+              case (maybePkg, maybeVsn) of
+                (Just pkg, Just vsn) ->
+                  do  let projectType = Parse.Package pkg
+
+                      cache <- Stuff.getPackageCache
+                      let home = Stuff.package cache pkg vsn
+                      let path = home </> "src" </> ModuleName.toFilePath moduleName <.> "elm"
+
+                      pkgExists <- Dir.doesDirectoryExist (home </> "src")
+                      fileExists <- File.exists path
+
+                      if pkgExists && fileExists then
+                        do  source <-
+                              maybe (File.readUtf8 path) return $
+                                Map.lookup path files
+
+                            return $
+                              Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+                                (fmap ((,) path) (Parse.fromByteString projectType source))
+
+                      else
+                        do  sendCreateWorkDoneProgress "package-download"
+                            sendProgressBegin "package-download" ("⬇️ Downloading " ++ Pkg.toChars pkg ++ "/" ++ Version.toChars vsn)
+
+                            startTime <- Data.Time.getCurrentTime
+
+                            manager <- Http.getManager
+
+                            Dir.createDirectoryIfMissing True (Stuff.package cache pkg vsn)
+                            result <- Details.downloadPackage cache manager pkg vsn
+
+                            endTime <- Data.Time.getCurrentTime
+                            sendProgressEnd "package-download" $
+                               "Done in " ++ show (Data.Time.diffUTCTime endTime startTime)
+
+                            case result of
+                              Left problem ->
+                                return $ Left $ DefinitionExitBadDownload pkg vsn problem
+
+                              Right () ->
+                                do  source <-
+                                      maybe (File.readUtf8 path) return $
+                                        Map.lookup path files
+
+                                    return $
+                                      Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
+                                        (fmap ((,) path) (Parse.fromByteString projectType source))
+
+                _ ->
+                  return $ Left $ DefinitionExitModuleNotFound root moduleName
+
 
 
 loadSrcModuleByPath :: State -> FilePath -> IO (Either DefinitionExit Src.Module)
