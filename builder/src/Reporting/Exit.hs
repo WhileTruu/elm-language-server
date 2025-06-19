@@ -15,7 +15,7 @@ module Reporting.Exit
   , OutlineProblem(..)
   , Details(..), toDetailsReport
   , DetailsBadDep(..)
-  , PackageProblem(..)
+  , PackageProblem(..), toPackageProblemReport
   , RegistryProblem(..)
   , BuildProblem(..), toBuildProblemReport
   , BuildProjectProblem(..)
