@@ -37,7 +37,7 @@ import qualified Elm.Version as V
 
 stuff :: FilePath -> FilePath
 stuff root =
-  root </> "elm-stuff" </> compilerVersion
+  root </> "elm-stuff" </> "whiletruu-elm-language-server_" ++ compilerVersion
 
 
 details :: FilePath -> FilePath
@@ -166,7 +166,7 @@ getReplCache =
 getCacheDir :: FilePath -> IO FilePath
 getCacheDir projectName =
   do  home <- getElmHome
-      let root = home </> compilerVersion </> projectName
+      let root = home </> "whiletruu-elm-language-server_" ++ compilerVersion </> projectName
       Dir.createDirectoryIfMissing True root
       return root
 

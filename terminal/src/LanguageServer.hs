@@ -199,7 +199,7 @@ run = do
 
                           case result of
                             Left err ->
-                              do  IO.hPutStr IO.stderr $ Reporting.Exit.toString $
+                              do  showMessage MessageTypeError $ Reporting.Exit.toString $
                                     diagnosticsExitToReport err
 
                                   loop state
@@ -245,7 +245,7 @@ run = do
 
                           case result of
                             Left err ->
-                              do  IO.hPutStr IO.stderr $ Reporting.Exit.toString $
+                              do  showMessage MessageTypeError $ Reporting.Exit.toString $
                                     diagnosticsExitToReport err
 
                                   loop state
@@ -2213,18 +2213,27 @@ diagnostics filePath remain =
           return $ Left DiagnosticsExitNoRoot
 
         Just root ->
-          do  result <-
+          do  files <- findElmFilesInSourceDirs root
+                         & fmap (filter (\a -> a /= filePath))
+
+              result <-
                 Dir.withCurrentDirectory root $
                   BW.withScope $ \scope -> Stuff.withRootLock root $
                     Task.run $
-                      do  details <- Task.eio DiagnosticsExitBadDetails $ Details.load Reporting.silent scope root
+                      do  details <- Task.eio DiagnosticsExitBadDetails $
+                                       Details.load Reporting.silent scope root
 
-                          artifacts <- Task.eio DiagnosticsExitBadBuild $ Build.fromPaths Reporting.silent root details (Data.NonEmptyList.List filePath remain)
+                          artifacts <- Task.eio DiagnosticsExitBadBuild $
+                                         Build.fromPaths Reporting.silent
+                                           root
+                                           details
+                                           (Data.NonEmptyList.List filePath files)
 
                           return (artifacts, details)
 
+
               case result of
-                Right (artifacts, details) ->
+                Right (artifacts, details) -> do
                   fmap Right $ mapM
                     (\path -> do
                       source <- File.readUtf8 path
@@ -2248,9 +2257,10 @@ diagnostics filePath remain =
                                       (Code.toSource source)
                               return $ ( path, 2, map warningToReport warns )
                     )
-                    (filePath : remain)
+                    -- FIXME: Get warnings only for one file, they are quite slow.
+                    (filePath : [])
 
-                Left (DiagnosticsExitBadBuild buildProblem) ->
+                Left (DiagnosticsExitBadBuild buildProblem) -> do
                   case Reporting.Exit.toBuildProblemReport buildProblem of
                     (Reporting.Exit.Help.CompilerReport filePath e es) ->
                       return $ Right $ map
@@ -2269,6 +2279,74 @@ diagnostics filePath remain =
 
                 Left exit  ->
                   return $ Left exit
+
+
+findFilesRecursive :: FilePath -> IO [FilePath]
+findFilesRecursive dir = do
+    entries <- Dir.listDirectory dir
+    paths <- mapM (\entry -> do
+        let path = dir Path.</> entry
+        isDir <- Dir.doesDirectoryExist path
+        if isDir
+            then findFilesRecursive path
+            else return [path]
+        ) entries
+    return (concat paths)
+
+
+findElmFilesInSourceDirs :: FilePath -> IO [FilePath]
+findElmFilesInSourceDirs root = do
+    eitherOutline <- Outline.read root
+    case eitherOutline of
+      Left _ -> return []
+      Right outline ->
+        do  srcDirs <- sourceDirs root outline
+
+            fmap concat $
+              mapM
+                (\(AbsoluteSrcDir srcDir) ->
+                  do  files <- findFilesRecursive (root Path.</> srcDir)
+                      return $ filter (\f -> Path.takeExtension f == ".elm") files
+                )
+                srcDirs
+
+
+sourceDirs :: FilePath -> Outline.Outline -> IO [AbsoluteSrcDir]
+sourceDirs root outline =
+  case outline of
+    Outline.App app ->
+      do  srcDirs <- traverse (toAbsoluteSrcDir root)
+                       (Data.NonEmptyList.toList (Outline._app_source_dirs app))
+          return $ srcDirs
+
+    Outline.Pkg pkg ->
+      do  srcDir <- toAbsoluteSrcDir root (Outline.RelativeSrcDir "src")
+          return [srcDir]
+
+
+
+-- SOURCE DIRECTORY
+
+
+newtype AbsoluteSrcDir =
+  AbsoluteSrcDir FilePath
+
+
+toAbsoluteSrcDir :: FilePath -> Outline.SrcDir -> IO AbsoluteSrcDir
+toAbsoluteSrcDir root srcDir =
+  AbsoluteSrcDir <$> Dir.canonicalizePath
+    (
+      case srcDir of
+        Outline.AbsoluteSrcDir dir -> dir
+        Outline.RelativeSrcDir dir -> root </> dir
+    )
+
+
+addRelative :: AbsoluteSrcDir -> FilePath -> FilePath
+addRelative (AbsoluteSrcDir srcDir) path =
+  srcDir </> path
+
+
 
 
 

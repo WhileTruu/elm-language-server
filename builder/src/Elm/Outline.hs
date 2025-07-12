@@ -198,7 +198,7 @@ read root =
               return $
                 if Map.notMember Pkg.core deps && pkg /= Pkg.core
                 then Left Exit.OutlineNoPkgCore
-                else Right outline
+                else Right (moveTestDependenciesToDependencies outline)
 
             App (AppOutline _ srcDirs direct indirect _ _)
               | Map.notMember Pkg.core direct ->
@@ -217,10 +217,28 @@ read root =
                           do  maybeDups <- detectDuplicates root (NE.toList srcDirs)
                               case maybeDups of
                                 Nothing ->
-                                  return $ Right outline
+                                  return $ Right (moveTestDependenciesToDependencies outline)
 
                                 Just (canonicalDir, (dir1,dir2)) ->
                                   return $ Left (Exit.OutlineHasDuplicateSrcDirs canonicalDir dir1 dir2)
+
+
+moveTestDependenciesToDependencies :: Outline -> Outline
+moveTestDependenciesToDependencies outline =
+  case outline of
+    App (AppOutline v srcDirs direct indirect testDirect testIndirect) ->
+      App
+        (AppOutline
+           v
+           srcDirs
+           (Map.union direct testDirect)
+           (Map.union indirect testIndirect)
+           Map.empty
+           Map.empty
+        )
+
+    Pkg (PkgOutline pkg s l v e deps tdeps ev) ->
+      Pkg (PkgOutline pkg s l v e (Map.union deps tdeps) Map.empty ev)
 
 
 isSrcDirMissing :: FilePath -> SrcDir -> IO Bool
