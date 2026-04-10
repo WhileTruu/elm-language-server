@@ -62,9 +62,15 @@ IDE/editor's LSP integration use the language server:
 ### Build 
 `cabal new-build --ghc-option=-split-sections` seems to work! 
 
+### Development
+
+haskell-language-server version 2.9.0.0 works.
+install with `ghcup install hls 2.9.0.0`
+
 # Acknowledgements
 
 These projects were of a lot of help:
 
 * [elm-tooling/elm-language-server](https://github.com/elm-tooling/elm-language-server)
 * [mdgriffith/elm-dev](https://github.com/mdgriffith/elm-dev)
+
