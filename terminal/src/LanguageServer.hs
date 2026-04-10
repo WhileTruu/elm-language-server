@@ -20,6 +20,7 @@ import Data.Foldable (foldrM)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy.Char8 as BSLC
+import qualified Data.Char as Char
 import qualified Data.Maybe as Maybe
 import qualified Data.List as List
 import Data.Name (Name)
@@ -145,7 +146,7 @@ run = do
                                 Aeson.object
                                   [ "capabilities" .= Aeson.object
                                     [ "definitionProvider" .= Aeson.object []
-                                    -- , "documentSymbolProvider" .= True
+                                    , "documentSymbolProvider" .= True
                                     , "textDocumentSync" .= Aeson.object
                                          [ "openClose" .= True
                                          , "change" .= (2 :: Int)
@@ -423,6 +424,60 @@ run = do
                                     definitionExitToReport filePath err
                                   loop state
 
+            Right "textDocument/documentSymbol" ->
+              do  let result =
+                        Aeson.parseEither (\obj ->
+                          do  params <- obj .: "params"
+                              id <- obj .: "id" :: Aeson.Parser Int
+
+                              textDocument <- params .: "textDocument"
+                              uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                              let filePath = drop 7 uri
+
+                              return (id, filePath)
+                        ) =<< Aeson.eitherDecode body
+
+                  case result of
+                    Left err ->
+                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
+                          loop state
+
+                    Right (id, filePath) ->
+                      do  -- FIXME: use provided work done token?
+                          sendCreateWorkDoneProgress "symbols"
+                          sendProgressBegin "symbols" "Finding symbols"
+
+                          startTime <- Data.Time.getCurrentTime
+                          result <- singleFileForSymbols state filePath
+                          endTime <- Data.Time.getCurrentTime
+                          let timeDiff = Data.Time.diffUTCTime endTime startTime
+
+                          case result of
+                            Right singleFile ->
+                              do  case _source singleFile of
+                                    Right srcMod ->
+                                      do  sendProgressEnd "symbols" $
+                                            "Got result in " ++ show timeDiff
+
+                                          respond id $ Aeson.toJSON $ srcModuleSymbols srcMod
+
+                                          loop state
+
+                                    Left err ->
+                                      do  sendProgressEnd "symbols" $
+                                            "Failed in " ++ show timeDiff
+
+                                          loop state
+                            Left err ->
+                              do  sendProgressEnd "symbols" $
+                                    "Failed " ++ show (length result) ++ " in " ++ show timeDiff
+
+                                  respondErr id $ Reporting.Exit.toString $
+                                    definitionExitToReport filePath err
+                                  loop state
+
+
             Right unknownMethod ->
               do  IO.hPutStr IO.stderr ("Unknown method: " ++ unknownMethod)
                   IO.hFlush IO.stderr
@@ -600,6 +655,20 @@ encodeRegion filePath (A.Region (A.Position sr sc) (A.Position er ec)) =
     ]
 
 
+encodeRange :: A.Region -> Aeson.Value
+encodeRange (A.Region (A.Position sr sc) (A.Position er ec)) =
+  Aeson.object
+    [ "start" .= Aeson.object
+        [ "line" .= (sr - 1)
+        , "character" .= (sc - 1)
+        ]
+    , "end" .= Aeson.object
+        [ "line" .= (er - 1)
+        , "character" .= (ec - 1)
+        ]
+    ]
+
+
 showMessage :: MessageType -> String -> IO ()
 showMessage messageType message =
   sendNotification "window/showMessage"
@@ -648,7 +717,7 @@ publishReportDiagnostic filePath severity reports =
                 ]
               ]
             , "severity" Aeson..= (severity :: Int)
-            , "message" Aeson..= (title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
+            , "message" Aeson..= (map Char.toUpper title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
             ]
         )
         reports
@@ -2234,6 +2303,7 @@ diagnostics filePath remain =
 
               case result of
                 Right (artifacts, details) -> do
+
                   fmap Right $ mapM
                     (\path -> do
                       source <- File.readUtf8 path
@@ -2279,6 +2349,50 @@ diagnostics filePath remain =
 
                 Left exit  ->
                   return $ Left exit
+
+showArtifacts artifacts =
+  do  x <- mapM showModule (Build._modules artifacts)
+
+      return ("_name: " ++ Pkg.toChars (Build._name artifacts) ++
+       "\n_artifacts: { _name: " ++ Pkg.toChars (Build._name artifacts) ++
+       -- ", _deps: [" ++ List.intercalate ", " (map showDep (Map.toList (Build._deps artifacts))) ++ "]" ++
+       -- ", _roots: [" ++ List.intercalate ", " (map showRoot (Data.NonEmptyList.toList (Build._roots artifacts))) ++ "]" ++
+       ", _modules: [" ++ List.intercalate ", " (x) ++ "]" ++
+       " }")
+
+-- showDep :: (ModuleName.Canonical, I.DependencyInterface) -> String
+showDep (ModuleName.Canonical pkg name, _) = Pkg.toChars pkg ++ " - " ++ ModuleName.toChars name
+
+showRoot :: Build.Root -> String
+showRoot root = case root of
+  Build.Inside name -> "Inside(" ++ ModuleName.toChars name ++ ")"
+  Build.Outside name _ _ -> "Outside(" ++ ModuleName.toChars name ++ ")"
+
+showModule :: Build.Module -> IO String
+showModule m = case m of
+  Build.Fresh name interface _ ->
+    return $
+      "Fresh(" ++ ModuleName.toChars name ++ ")" ++ "\n" ++
+      "  interface: \n" ++
+      "    _values: [" ++
+        List.intercalate ", " (map (\(a, _) -> Name.toChars a) (Map.toList (Interface._values interface))) ++
+      "]" ++ "\n" ++
+      "\n"
+
+  Build.Cached name _ cached ->
+    do  interface <- Control.Concurrent.MVar.readMVar cached
+        case interface of
+          Build.Unneeded ->
+            return $ "Cached(" ++ ModuleName.toChars name ++ "): " ++ "Unneeded\n"
+          Build.Loaded interface_ ->
+            return $ "Cached(" ++ ModuleName.toChars name ++ ")\n" ++
+              "  interface: \n" ++
+              "    _values: [" ++
+                List.intercalate ", " (map (\(a, _) -> Name.toChars a) (Map.toList (Interface._values interface_))) ++
+              "]" ++ "\n"
+
+          Build.Corrupted ->
+            return $ "Cached(" ++ ModuleName.toChars name ++ "): " ++ "Corrupted\n"
 
 
 findFilesRecursive :: FilePath -> IO [FilePath]
@@ -3452,3 +3566,103 @@ usedInBranch (Can.CaseBranch pattern expr) found =
 usedInAnnotation :: Can.Annotation -> Set.Set ModuleName.Canonical -> Set.Set ModuleName.Canonical
 usedInAnnotation (Can.Forall freevars type_) found =
   usedInType type_ found
+
+
+
+-- SYMBOLS
+
+
+singleFileForSymbols :: State -> FilePath -> IO (Either DefinitionExit SingleFileResult)
+singleFileForSymbols state filePath =
+  BW.withScope $ \scope ->
+  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+
+      case maybeRoot of
+        Nothing ->
+          return (Left DefinitionExitNoRoot)
+
+        Just root ->
+          -- TODO: figure out why root lock stuff is anywhere anyway :D
+          do  details <- Stuff.withRootLock root $
+                Details.load Reporting.silent scope root
+
+              case details of
+                Left exit -> return $ Left $ DefinitionExitBadDetails exit
+                Right details_ ->
+                  do  let projectType =
+                            case Details._outline details_ of
+                              Details.ValidApp _ -> Parse.Application
+                              Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
+
+                      fmap Right $ loadSingle projectType root filePath
+
+
+srcModuleSymbols :: Src.Module -> [Aeson.Value]
+srcModuleSymbols mod =
+  let
+    moduleChildren =
+      List.concat
+        [
+          map
+            (\(A.At region (Src.Value (A.At nameRegion name) _ _ _)) ->
+              SymbolInfo name 12 region nameRegion []
+            )
+            (Src._values mod),
+          map
+            (\(A.At region (Src.Union (A.At nameRegion name) _ variants)) ->
+              SymbolInfo name 10 region nameRegion (
+                map
+                  (\(a, type_) ->
+                    SymbolInfo (A.toValue a) 22 (A.toRegion a) (A.toRegion a) []
+                  )
+                  variants
+              )
+            )
+            (Src._unions mod),
+          map
+            (\(A.At region (Src.Alias (A.At nameRegion name) _ _)) ->
+              SymbolInfo name 23 region nameRegion []
+            )
+            (Src._aliases mod),
+          map
+            (\(A.At region (Src.Infix name _ _ _)) ->
+              SymbolInfo name 25 region region []
+            )
+            (Src._binops mod)
+        ]
+        & List.sortOn (\a -> let (A.Region (A.Position start _) _) = _symbol_region a in start)
+  in
+  maybe
+    moduleChildren
+    (\name ->
+      [
+        SymbolInfo
+          (A.toValue name)
+          2
+          (A.toRegion name)
+          (A.toRegion name)
+          moduleChildren
+      ]
+    )
+    (Src._name mod)
+    & map symbolInfoToJson
+
+
+data SymbolInfo = SymbolInfo
+  { _symbol_name :: Name
+  , _symbol_kind :: Int
+  , _symbol_region :: A.Region
+  , _symbol_selection_region :: A.Region
+  , _symbol_children :: [SymbolInfo]
+  }
+
+
+symbolInfoToJson :: SymbolInfo -> Aeson.Value
+symbolInfoToJson sym =
+  Aeson.object
+    [ "name" Aeson..= (Name.toChars (_symbol_name sym) :: String)
+    , "range" Aeson..= encodeRange (_symbol_region sym)
+    , "selectionRange" Aeson..= encodeRange (_symbol_selection_region sym)
+    , "kind" Aeson..= (_symbol_kind sym :: Int)
+    , "children" Aeson..= map symbolInfoToJson (_symbol_children sym)
+    ]
