@@ -11,6 +11,7 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 - 🧭 Go to definition
 - 🔍 Find references
 - 🛡️ Diagnostics (errors and warnings)
+- 🏷️ Document symbols
 
 
 ## Try it out quickly via Nix
