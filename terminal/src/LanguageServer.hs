@@ -9,6 +9,7 @@ module LanguageServer
 
 import Control.Applicative ((<|>))
 import qualified Control.Concurrent.MVar
+import qualified Control.Exception as Exception
 import Data.Aeson ((.:), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
@@ -36,6 +37,8 @@ import qualified Data.ByteString.UTF8 as BS_UTF8
 
 import qualified System.IO as IO
 import qualified System.Directory as Dir
+import qualified System.Exit as Exit
+import qualified System.Process as Proc
 
 import qualified File
 import qualified System.FilePath as Path
@@ -99,6 +102,7 @@ import qualified Http
 data State = State
   { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
   , _prevPublishedDiagnosticsFiles :: Control.Concurrent.MVar.MVar [FilePath]
+  , _elmFormat :: Control.Concurrent.MVar.MVar (Maybe FilePath)
   }
 
 
@@ -108,6 +112,7 @@ run = do
     State
       <$> Control.Concurrent.MVar.newMVar Map.empty
       <*> Control.Concurrent.MVar.newMVar []
+      <*> Control.Concurrent.MVar.newMVar Nothing
 
   loop state
 
@@ -132,7 +137,12 @@ run = do
                               id <- obj .: "id"
                               -- FIXME: type annotation needed because value is not used probably
                               rootPath <- params .: "rootPath" :: Aeson.Parser String
-                              return ( id, rootPath )
+                              initializationOptions <- params Aeson..:? "initializationOptions" :: Aeson.Parser (Maybe Aeson.Object)
+
+                              languageServer <- maybe (pure Nothing) (\obj -> obj Aeson..:? "whiletruu-elm-language-server") initializationOptions
+                              elmFormatPath <- maybe (pure Nothing) (\obj -> obj Aeson..:? "elmFormatPath") languageServer
+
+                              return ( id, rootPath, elmFormatPath)
                         ) =<< Aeson.eitherDecode body
 
                   case result of
@@ -141,12 +151,18 @@ run = do
                           IO.hFlush IO.stderr
                           loop state
 
-                    Right (id, rootPath) ->
-                      do  let response =
+                    Right (id, rootPath, elmFormatPath) ->
+                      do  elmFormat <- getElmFormat elmFormatPath
+
+                          Control.Concurrent.MVar.modifyMVar_ (_elmFormat state) $
+                            \_ -> pure elmFormat
+
+                          let response =
                                 Aeson.object
                                   [ "capabilities" .= Aeson.object
                                     [ "definitionProvider" .= Aeson.object []
                                     , "documentSymbolProvider" .= True
+                                    , "documentFormattingProvider" .= Maybe.isJust elmFormat
                                     , "textDocumentSync" .= Aeson.object
                                          [ "openClose" .= True
                                          , "change" .= (2 :: Int)
@@ -424,6 +440,74 @@ run = do
                                     definitionExitToReport filePath err
                                   loop state
 
+            Right "textDocument/formatting" ->
+              do  let result =
+                        Aeson.parseEither (\obj ->
+                          do  params <- obj .: "params"
+                              id <- obj .: "id" :: Aeson.Parser Int
+
+                              textDocument <- params .: "textDocument"
+                              uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                              let filePath = drop 7 uri
+
+                              pure (id, filePath)
+                        ) =<< Aeson.eitherDecode body
+
+                  case result of
+                    Left err ->
+                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
+                          loop state
+
+                    Right (id, filePath) ->
+                      do  elmFormat <- Control.Concurrent.MVar.readMVar (_elmFormat state)
+
+                          case elmFormat of
+                            Nothing ->
+                              do  respondErr id "elm-format not found"
+                                  loop state
+
+                            Just executable ->
+                              do  files <- Control.Concurrent.MVar.readMVar (_changedFiles state)
+                                  source <- maybe (File.readUtf8 filePath) return $ Map.lookup filePath files
+
+                                  result <-
+                                    Exception.try $
+                                      Proc.readCreateProcessWithExitCode (Proc.proc executable ["--stdin"]) (BS_UTF8.toString source)
+                                      :: IO (Either IOError (Exit.ExitCode, String, String))
+
+                                  case result of
+                                    Left _ ->
+                                      do  respondErr id $ "Failed to run elm-format: " ++ executable
+                                          loop state
+
+                                    Right (Exit.ExitFailure _, _, stderr_ )->
+                                      do  respondErr id stderr_
+                                          loop state
+
+                                    Right (Exit.ExitSuccess, stdout_, _)->
+                                      let
+                                        lines = BSC.split '\n' source 
+                                      in
+                                      do  respond id $ Aeson.toJSON
+                                            [ Aeson.object
+                                                [ "range" .= Aeson.object
+                                                  [ "start" .= Aeson.object
+                                                      [ "line" .= (0 :: Int)
+                                                      , "character" .= (0 :: Int)
+                                                      ]
+                                                  , "end" .= Aeson.object
+                                                      [ "line" .= max 0 (length lines - 1)
+                                                      , "character" .= case reverse lines of 
+                                                                         last : _ -> BSC.length last
+                                                                         [] -> 0
+                                                      ]
+                                                  ]
+                                                , "newText" .= stdout_
+                                                ]
+                                            ]
+                                          loop state
+
             Right "textDocument/documentSymbol" ->
               do  let result =
                         Aeson.parseEither (\obj ->
@@ -509,6 +593,16 @@ parseTextDocumentContentChangeEvent =
         text <- obj .: "text" :: Aeson.Parser String
 
         return (range, text)
+
+
+getElmFormat :: Maybe String -> IO (Maybe FilePath)
+getElmFormat maybeName =
+  case maybeName of
+    Just name ->
+      Dir.findExecutable name
+
+    Nothing ->
+      Dir.findExecutable "elm-format"
 
 
 applyChanges :: [((A.Position, A.Position), String)] -> BS.ByteString -> BS.ByteString

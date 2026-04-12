@@ -12,7 +12,10 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 - 🔍 Find references
 - 🛡️ Diagnostics (errors and warnings)
 - 🏷️ Document symbols
+- 🧹 Formatting with `elm-format` (enabled when executable is available on init)
 
+## Configuration
+- `initializationOptions.whiletruu-elm-language-server.elmFormatPath` formatter executable, defaults to `elm-format`
 
 ## Try it out quickly via Nix
 
