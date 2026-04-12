@@ -6,6 +6,7 @@ module Reporting.Error
   , toDoc
   , toJson
   , toReports
+  , toReportsForLs
   )
   where
 
@@ -209,3 +210,33 @@ encodeRegion (A.Region (A.Position sr sc) (A.Position er ec)) =
             , "column" ==> E.int (fromIntegral ec)
             ]
     ]
+
+
+
+-- TO REPORT FOR LANGUAGE SERVER
+
+
+toReportsForLs :: Code.Source -> Error -> NE.List Report.Report
+toReportsForLs source err =
+  case err of
+    BadSyntax syntaxError ->
+      NE.List (Syntax.toReportForLs source syntaxError) []
+
+    BadImports errs ->
+      fmap Import.toReportForLs errs
+
+    BadNames errs ->
+      fmap (Canonicalize.toReportForLs source) (OneOrMore.destruct NE.List errs)
+
+    BadTypes localizer errs ->
+      fmap (Type.toReportForLs localizer) errs
+
+    BadMains localizer errs ->
+      fmap (Main.toReport localizer source) (OneOrMore.destruct NE.List errs)
+
+    BadPatterns errs ->
+      fmap Pattern.toReportForLs errs
+
+    BadDocs docsErr ->
+      Docs.toReports source docsErr
+

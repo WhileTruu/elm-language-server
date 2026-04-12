@@ -4,6 +4,7 @@ module Reporting.Warning
   ( Warning(..)
   , Context(..)
   , toReport
+  , toReportForLs
   )
   where
 
@@ -102,3 +103,45 @@ defOrPat context def pat =
     Def -> def
     Pattern -> pat
 
+
+
+-- TO REPORT FOR LANGUAGE SERVER
+
+
+toReportForLs :: L.Localizer -> Warning -> Report.Report
+toReportForLs localizer warning =
+  case warning of
+    UnusedImport region moduleName ->
+      Report.Report "unused import" region [] $
+        D.reflow $
+          "Nothing from the `" <> Name.toChars moduleName <> "` module is used in this file."
+
+    UnusedVariable region context name ->
+      let title = defOrPat context "unused definition" "unused variable" in
+      Report.Report title region [] $
+        D.stack
+          [ D.reflow $
+              "You are not using `" <> Name.toChars name <> "` anywhere."
+          , D.reflow $
+              "Is there a typo? Maybe you intended to use `" <> Name.toChars name
+              <> "` somewhere but typed another name instead?"
+          ]
+
+    MissingTypeAnnotation region name inferredType ->
+        Report.Report "missing type annotation" region [] $
+          D.stack
+            [ D.reflow $
+                case Type.deepDealias inferredType of
+                  Can.TLambda _ _ ->
+                    "The `" <> Name.toChars name <> "` function has no type annotation."
+
+                  _ ->
+                    "The `" <> Name.toChars name <> "` definition has no type annotation."
+            , D.stack
+                [ "I inferred the type annotation myself though! You can copy it into your code:"
+                , D.green $ D.hang 4 $ D.sep $
+                    [ D.fromName name <> " :"
+                    , RT.canToDoc localizer RT.None inferredType
+                    ]
+                ]
+            ]

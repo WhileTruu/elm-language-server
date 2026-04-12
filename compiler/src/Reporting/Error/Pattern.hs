@@ -3,6 +3,7 @@
 module Reporting.Error.Pattern
   ( P.Error(..)
   , toReport
+  , toReportForLs
   )
   where
 
@@ -193,3 +194,60 @@ delist pattern revEntries =
 
         _ ->
           Conses (reverse revEntries) pattern
+
+
+
+-- TO REPORT FOR LANGUAGE SERVER
+
+
+toReportForLs :: P.Error -> Report.Report
+toReportForLs err =
+  case err of
+    P.Redundant _caseRegion patternRegion index ->
+      Report.Report "REDUNDANT PATTERN" patternRegion [] $
+        D.stack
+          [ D.reflow $
+              "The " <> D.intToOrdinal index <> " pattern is redundant."
+          , D.reflow $
+              "Any value with this shape will be handled by a previous\
+              \ pattern, so it should be removed."
+          ]
+
+    P.Incomplete region context unhandled ->
+      case context of
+        P.BadArg ->
+          Report.Report "UNSAFE PATTERN" region [] $
+            D.stack
+              [ "This pattern does not cover all possibilities."
+              , "Other possibilities include:"
+              , unhandledPatternsToDocBlock unhandled
+              , D.reflow $
+                  "I would have to crash if I saw one of those! So rather than\
+                  \ pattern matching in function arguments, put a `case` in\
+                  \ the function body to account for all possibilities."
+              ]
+
+        P.BadDestruct ->
+          Report.Report "UNSAFE PATTERN" region [] $
+            D.stack
+              [ "This pattern does not cover all possible values."
+              , "Other possibilities include:"
+              , unhandledPatternsToDocBlock unhandled
+              , D.reflow $
+                  "I would have to crash if I saw one of those! You can use\
+                  \ `let` to deconstruct values only if there is ONE possibility.\
+                  \ Switch to a `case` expression to account for all possibilities."
+              ]
+
+        P.BadCase ->
+          Report.Report "MISSING PATTERNS" region [] $
+            D.stack
+              [ "This `case` does not have branches for all possibilities."
+              , "Missing possibilities include:"
+              , unhandledPatternsToDocBlock unhandled
+              , D.reflow $
+                  "I would have to crash if I saw one of those. Add branches for them!"
+              ]
+
+
+

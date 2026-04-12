@@ -9,3 +9,4 @@ travis.log
 .envrc
 .direnv
 result
+dist-newstyle

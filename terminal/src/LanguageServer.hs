@@ -2306,8 +2306,6 @@ diagnostics filePath remain =
 
                   fmap Right $ mapM
                     (\path -> do
-                      source <- File.readUtf8 path
-
                       let projectType =
                             case Details._outline details of
                               Details.ValidApp _ -> Parse.Application
@@ -2322,9 +2320,8 @@ diagnostics filePath remain =
                         Just ( sourceMod, warns ) ->
                           do  let warningToReport :: Reporting.Warning.Warning -> Reporting.Report.Report
                                   warningToReport =
-                                    Reporting.Warning.toReport
+                                    Reporting.Warning.toReportForLs
                                       (Reporting.Render.Type.Localizer.fromModule sourceMod)
-                                      (Code.toSource source)
                               return $ ( path, 2, map warningToReport warns )
                     )
                     -- FIXME: Get warnings only for one file, they are quite slow.
@@ -2339,7 +2336,7 @@ diagnostics filePath remain =
                             path,
                             1,
                             Data.NonEmptyList.toList $
-                              Reporting.Error.toReports (Code.toSource source) err
+                              Reporting.Error.toReportsForLs (Code.toSource source) err
                           )
                         )
                         (e : es)

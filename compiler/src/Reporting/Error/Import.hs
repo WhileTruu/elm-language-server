@@ -3,6 +3,7 @@ module Reporting.Error.Import
   ( Error(..)
   , Problem(..)
   , toReport
+  , toReportForLs
   )
   where
 
@@ -160,3 +161,85 @@ toSuggestions :: ModuleName.Raw -> Set.Set ModuleName.Raw -> [ModuleName.Raw]
 toSuggestions name unimportedModules =
   take 4 $
     Suggest.sort (ModuleName.toChars name) ModuleName.toChars (Set.toList unimportedModules)
+
+
+
+-- TO REPORT FOR LANGUAGE SERVER
+
+
+toReportForLs :: Error -> Report.Report
+toReportForLs (Error region name unimportedModules problem) =
+  case problem of
+    NotFound ->
+      Report.Report "MODULE NOT FOUND" region [] $
+        D.stack
+          [
+            D.reflow $
+              "You are trying to import a `" ++ ModuleName.toChars name ++ "` module."
+          ,
+            D.reflow $
+              "I checked the \"dependencies\" and \"source-directories\" listed in your elm.json,\
+              \ but I cannot find it! Maybe it is a typo for one of these names?"
+          ,
+            D.dullyellow $ D.indent 4 $ D.vcat $
+              map D.fromName (toSuggestions name unimportedModules)
+          ,
+            case Map.lookup name Pkg.suggestions of
+              Nothing ->
+                D.toSimpleHint $
+                  "If it is not a typo, check the \"dependencies\" and \"source-directories\"\
+                  \ of your elm.json to make sure all the packages you need are listed there!"
+
+              Just dependency ->
+                D.toFancyHint
+                  ["Maybe","you","want","the"
+                  ,"`" <> D.fromName name <> "`"
+                  ,"module","defined","in","the"
+                  ,D.fromChars (Pkg.toChars dependency)
+                  ,"package?","Running"
+                  ,D.green (D.fromChars ("elm install " ++ Pkg.toChars dependency))
+                  ,"should","make","it","available!"
+                  ]
+          ]
+
+    Ambiguous path _ pkg _ ->
+      Report.Report "AMBIGUOUS IMPORT" region [] $
+        D.stack
+          [
+            D.reflow $
+              "You are trying to import a `" ++ ModuleName.toChars name ++ "` module."
+          ,
+            D.fillSep $
+              ["But","I","found","multiple","modules","with","that","name.","One","in","the"
+              ,D.dullyellow (D.fromChars (Pkg.toChars pkg))
+              ,"package,","and","another","defined","locally","in","the"
+              ,D.dullyellow (D.fromChars path)
+              ,"file.","I","do","not","have","a","way","to","choose","between","them."
+              ]
+          ]
+
+    AmbiguousLocal path1 path2 paths ->
+      Report.Report "AMBIGUOUS IMPORT" region [] $
+        D.stack
+          [
+            D.reflow $
+              "You are trying to import a `" ++ ModuleName.toChars name ++ "` module\
+              \, but I found multiple files in your \"source-directories\" with that name:"
+          ,
+            D.dullyellow $ D.indent 4 $ D.vcat $
+              map D.fromChars (path1:path2:paths)
+          ]
+
+    AmbiguousForeign pkg1 pkg2 pkgs ->
+      Report.Report "AMBIGUOUS IMPORT" region [] $
+        D.stack
+          [
+            D.reflow $
+              "You are trying to import a `" ++ ModuleName.toChars name ++ "` module\
+              \ ,but multiple packages in your \"dependencies\" that expose a module that name:"
+          ,
+            D.dullyellow $ D.indent 4 $ D.vcat $
+              map (D.fromChars . Pkg.toChars) (pkg1:pkg2:pkgs)
+          ]
+
+

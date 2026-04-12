@@ -15,6 +15,7 @@ module Reporting.Error.Type
   , ptypeReplace
   -- make reports
   , toReport
+  , toReportForLs
   )
   where
 
@@ -1611,3 +1612,427 @@ toInfiniteReport source localizer region name overallType =
               "to get unstuck!"
           ]
       )
+
+
+
+-- TO REPORT FOR LANGUAGE SERVER
+
+
+toReportForLs :: L.Localizer -> Error -> Report.Report
+toReportForLs localizer err =
+  case err of
+    BadExpr region category actualType expected ->
+      toExprReportForLs localizer region category actualType expected
+
+    BadPattern region category tipe expected ->
+      toPatternReportForLs localizer region category tipe expected
+
+    InfiniteType region name overallType ->
+      toInfiniteReportForLs localizer region name overallType
+
+
+
+-- TO PATTERN REPORT FOR LANGUAGE SERVER
+
+
+toPatternReportForLs :: L.Localizer -> A.Region -> PCategory -> T.Type -> PExpected T.Type -> Report.Report
+toPatternReportForLs localizer patternRegion category tipe expected =
+  Report.Report "TYPE MISMATCH" patternRegion [] $
+  case expected of
+    PNoExpectation expectedType ->
+      D.stack
+        [ "This pattern is being used in an unexpected way."
+        , patternTypeComparison localizer tipe expectedType
+            (addPatternCategory "It is" category)
+            "But it needs to match:"
+            []
+        ]
+
+    PFromContext _region context expectedType ->
+      D.stack $
+        case context of
+          PTypedArg name index ->
+            [ D.reflow $
+                "The " <> D.ordinal index <> " argument to `" <> Name.toChars name <> "` is weird."
+            , patternTypeComparison localizer tipe expectedType
+                (addPatternCategory "The argument is a pattern that matches" category)
+                ( "But the type annotation on `" <> Name.toChars name
+                  <> "` says the " <> D.ordinal index <> " argument should be:"
+                )
+                []
+            ]
+
+          PCaseMatch index ->
+            if index == Index.first then
+              [
+                patternTypeComparison localizer tipe expectedType
+                  (addPatternCategory "The 1st pattern in this `case` is trying to match" category)
+                  "But the expression between `case` and `of` is:"
+                  [ D.reflow $
+                      "These can never match! Is the pattern the problem? Or is it the expression?"
+                  ]
+              ]
+            else
+              [ patternTypeComparison localizer tipe expectedType
+                  (addPatternCategory ("The " <> D.ordinal index <> " pattern in this `case` is trying to match") category)
+                  "But all the previous patterns match:"
+                  []
+              ]
+
+          PCtorArg name index ->
+            [ D.reflow $
+                "The " <> D.ordinal index <> " argument to `" <> Name.toChars name <> "` is weird."
+            , patternTypeComparison localizer tipe expectedType
+                (addPatternCategory "It is trying to match" category)
+                ( "But `" <> Name.toChars name <> "` needs its "
+                  <> D.ordinal index <> " argument to be:"
+                )
+                []
+            ]
+
+          PListEntry index ->
+            [ D.reflow $
+                "The " <> D.ordinal index <> " pattern in this list does not match all the previous ones."
+            , patternTypeComparison localizer tipe expectedType
+                (addPatternCategory ("The " <> D.ordinal index <> " pattern is trying to match") category)
+                "But all the previous patterns in the list are:"
+                []
+            ]
+
+          PTail ->
+            [ D.reflow $
+                "The pattern after (::) is causing issues."
+            , patternTypeComparison localizer tipe expectedType
+                (addPatternCategory "The pattern after (::) is trying to match" category)
+                "But it needs to match lists like this:"
+                []
+            ]
+
+
+
+-- TO EXPR REPORT
+
+
+toExprReportForLs :: L.Localizer -> A.Region -> Category -> T.Type -> Expected T.Type -> Report.Report
+toExprReportForLs localizer exprRegion category tipe expected =
+  case expected of
+    NoExpectation expectedType ->
+      Report.Report "TYPE MISMATCH" exprRegion [] $
+        D.stack
+          [ "This expression is being used in an unexpected way."
+          , typeComparison localizer tipe expectedType
+              (addCategory "It is" category)
+              "But you are trying to use it as:"
+              []
+          ]
+
+    FromAnnotation name _arity subContext expectedType ->
+      let
+        thing =
+          case subContext of
+            TypedIfBranch index   -> D.ordinal index <> " branch of this `if` expression:"
+            TypedCaseBranch index -> D.ordinal index <> " branch of this `case` expression:"
+            TypedBody             -> "body of the `" <> Name.toChars name <> "` definition:"
+
+        itIs =
+          case subContext of
+            TypedIfBranch index   -> "The " <> D.ordinal index <> " branch is"
+            TypedCaseBranch index -> "The " <> D.ordinal index <> " branch is"
+            TypedBody             -> "The body is"
+      in
+      Report.Report "TYPE MISMATCH" exprRegion [] $
+        D.stack
+          [ D.reflow ("Something is off with the " <> thing)
+          , typeComparison localizer tipe expectedType
+              (addCategory itIs category)
+              ("But the type annotation on `" <> Name.toChars name <> "` says it should be:")
+              []
+          ]
+
+    FromContext _region context expectedType ->
+      let
+        mismatch (_maybeHighlight, problem, thisIs, insteadOf, furtherDetails) =
+          Report.Report "TYPE MISMATCH" exprRegion [] $
+            D.stack
+              [ D.reflow problem
+              , typeComparison localizer tipe expectedType (addCategory thisIs category) insteadOf furtherDetails
+              ]
+
+        badType (_maybeHighlight, problem, thisIs, furtherDetails) =
+          Report.Report "TYPE MISMATCH" exprRegion [] $
+            D.stack
+              [ D.reflow problem
+              , loneType localizer tipe expectedType (D.reflow (addCategory thisIs category)) furtherDetails
+              ]
+
+        custom _maybeHighlight docPair =
+          Report.Report "TYPE MISMATCH" exprRegion [] $
+            D.stack [ fst docPair, snd docPair ]
+      in
+      case context of
+        ListEntry index ->
+          let ith = D.ordinal index in
+          mismatch
+          ( Just exprRegion
+          , "The " <> ith <> " element of this list does not match all the previous elements:"
+          , "The " <> ith <> " element is"
+          , "But all the previous elements in the list are:"
+          , [ D.link "Hint"
+                "Everything in a list must be the same type of value. This way, we never\
+                \ run into unexpected values partway through a List.map, List.foldl, etc. Read"
+                "custom-types"
+                "to learn how to “mix” types."
+            ]
+          )
+
+        Negate ->
+          badType
+          ( Just exprRegion
+          , "I do not know how to negate this type of value:"
+          , "It is"
+          , [ D.fillSep
+                ["But","I","only","now","how","to","negate"
+                ,D.dullyellow "Int","and",D.dullyellow "Float","values."
+                ]
+            ]
+          )
+
+        OpLeft op ->
+          custom (Just exprRegion) $
+            opLeftToDocs localizer category op tipe expectedType
+
+        OpRight op ->
+          case opRightToDocs localizer category op tipe expectedType of
+            EmphBoth details ->
+              custom Nothing details
+
+            EmphRight details ->
+              custom (Just exprRegion) details
+
+        IfCondition ->
+          badType
+          ( Just exprRegion
+          , "This `if` condition does not evaluate to a boolean value, True or False."
+          , "It is"
+          , [ D.fillSep ["But","I","need","this","`if`","condition","to","be","a",D.dullyellow "Bool","value."]
+            ]
+          )
+
+        IfBranch index ->
+          let ith = D.ordinal index in
+          mismatch
+          ( Just exprRegion
+          , "The " <> ith <> " branch of this `if` does not match all the previous branches:"
+          , "The " <> ith <> " branch is"
+          , "But all the previous branches result in:"
+          , [ D.link "Hint"
+                "All branches in an `if` must produce the same type of values. This way, no\
+                \ matter which branch we take, the result is always a consistent shape. Read"
+                "custom-types"
+                "to learn how to “mix” types."
+            ]
+          )
+
+        CaseBranch index ->
+          let ith = D.ordinal index in
+          mismatch
+          ( Just exprRegion
+          , "The " <> ith <> " branch of this `case` does not match all the previous branches:"
+          , "The " <> ith <> " branch is"
+          , "But all the previous branches result in:"
+          , [ D.link "Hint"
+                "All branches in a `case` must produce the same type of values. This way, no\
+                \ matter which branch we take, the result is always a consistent shape. Read"
+                "custom-types"
+                "to learn how to “mix” types."
+            ]
+          )
+
+        CallArity maybeFuncName numGivenArgs ->
+          Report.Report "TOO MANY ARGS" exprRegion [] $
+          D.stack $
+          case countArgs tipe of
+            0 ->
+              let
+                thisValue =
+                  case maybeFuncName of
+                    NoName        -> "This value"
+                    FuncName name -> "The `" <> Name.toChars name <> "` value"
+                    CtorName name -> "The `" <> Name.toChars name <> "` value"
+                    OpName op     -> "The (" <> Name.toChars op <> ") operator"
+              in
+              [ D.reflow $ thisValue <> " is not a function, but it was given " <> D.args numGivenArgs <> "."
+              , D.reflow $ "Are there any missing commas? Or missing parentheses?"
+              ]
+
+            n ->
+              let
+                thisFunction =
+                  case maybeFuncName of
+                    NoName        -> "This function"
+                    FuncName name -> "The `" <> Name.toChars name <> "` function"
+                    CtorName name -> "The `" <> Name.toChars name <> "` constructor"
+                    OpName op     -> "The (" <> Name.toChars op <> ") operator"
+              in
+              [ D.reflow $ thisFunction <> " expects " <> D.args n <> ", but it got " <> show numGivenArgs <> " instead."
+              , D.reflow $ "Are there any missing commas? Or missing parentheses?"
+              ]
+
+        CallArg maybeFuncName index ->
+          let
+            ith = D.ordinal index
+
+            thisFunction =
+              case maybeFuncName of
+                NoName        -> "this function"
+                FuncName name -> "`" <> Name.toChars name <> "`"
+                CtorName name -> "`" <> Name.toChars name <> "`"
+                OpName op     -> "(" <> Name.toChars op <> ")"
+          in
+          mismatch
+          ( Just exprRegion
+          , "The " <> ith <> " argument to " <> thisFunction <> " is not what I expect:"
+          , "This argument is"
+          , "But " <> thisFunction <> " needs the " <> ith <> " argument to be:"
+          ,
+            if Index.toHuman index == 1 then
+              []
+            else
+              [ D.toSimpleHint $
+                 "I always figure out the argument types from left to right. If an argument\
+                  \ is acceptable, I assume it is “correct” and move on. So the problem may\
+                  \ actually be in one of the previous arguments!"
+              ]
+          )
+
+        RecordAccess recordRegion maybeName fieldRegion field ->
+          case T.iteratedDealias tipe of
+            T.Record fields ext ->
+              custom (Just fieldRegion)
+                ( D.reflow $
+                    "This "
+                    <> maybe "" (\n -> "`" <> Name.toChars n <> "`") maybeName
+                    <> " record does not have a `" <> Name.toChars field <> "` field:"
+                , case Suggest.sort (Name.toChars field) (Name.toChars . fst) (Map.toList fields) of
+                    [] ->
+                      D.reflow "In fact, it is a record with NO fields!"
+
+                    f:fs ->
+                      D.stack
+                        [ D.reflow $
+                            "This is usually a typo. Here are the "
+                            <> maybe "" (\n -> "`" <> Name.toChars n <> "`") maybeName
+                            <> " fields that are most similar:"
+                        , toNearbyRecord localizer f fs ext
+                        , D.fillSep
+                            ["So","maybe",D.dullyellow (D.fromName field)
+                            ,"should","be",D.green (D.fromName (fst f)) <> "?"
+                            ]
+                        ]
+                )
+
+            _ ->
+              badType
+              ( Just recordRegion
+              , "This is not a record, so it has no fields to access!"
+              , "It is"
+              , [ D.fillSep
+                    ["But","I","need","a","record","with","a"
+                    ,D.dullyellow (D.fromName field),"field!"
+                    ]
+                ]
+              )
+
+        RecordUpdateKeys record expectedFields ->
+          case T.iteratedDealias tipe of
+            T.Record actualFields ext ->
+              case Map.lookupMin (Map.difference expectedFields actualFields) of
+                Nothing ->
+                  mismatch
+                  ( Nothing
+                  , "Something is off with this record update:"
+                  , "The `" <> Name.toChars record <> "` record is"
+                  , "But this update needs it to be compatable with:"
+                  , [ D.reflow
+                        "Do you mind creating an <http://sscce.org/> that produces this error message and\
+                        \ sharing it at <https://github.com/elm/error-message-catalog/issues> so we\
+                        \ can try to give better advice here?"
+                    ]
+                  )
+
+                Just (field, Can.FieldUpdate fieldRegion _) ->
+                  let
+                    rStr = "`" <> Name.toChars record <> "`"
+                    fStr = "`" <> Name.toChars field <> "`"
+                  in
+                  custom (Just fieldRegion)
+                    ( D.reflow $
+                        "The " <> rStr <> " record does not have a " <> fStr <> " field:"
+                    , case Suggest.sort (Name.toChars field) (Name.toChars . fst) (Map.toList actualFields) of
+                        [] ->
+                          D.reflow $ "In fact, " <> rStr <> " is a record with NO fields!"
+
+                        f:fs ->
+                          D.stack
+                            [ D.reflow $
+                                "This is usually a typo. Here are the " <> rStr <> " fields that are most similar:"
+                            , toNearbyRecord localizer f fs ext
+                            , D.fillSep
+                                ["So","maybe",D.dullyellow (D.fromName field)
+                                ,"should","be",D.green (D.fromName (fst f)) <> "?"
+                                ]
+                            ]
+                    )
+
+            _ ->
+              badType
+              ( Just exprRegion
+              , "This is not a record, so it has no fields to update!"
+              , "It is"
+              , [ D.reflow $ "But I need a record!"
+                ]
+              )
+
+        RecordUpdateValue field ->
+          mismatch
+          ( Just exprRegion
+          , "I cannot update the `" <> Name.toChars field <> "` field like this:"
+          , "You are trying to update `" <> Name.toChars field <> "` to be"
+          , "But it should be:"
+          , [ D.toSimpleNote
+                "The record update syntax does not allow you to change the type of fields.\
+                \ You can achieve that with record constructors or the record literal syntax."
+            ]
+          )
+
+        Destructure ->
+          mismatch
+          ( Nothing
+          , "This definition is causing issues:"
+          , "You are defining"
+          , "But then trying to destructure it as:"
+          , []
+          )
+
+-- INFINITE TYPES FOR LANGUAGE SERVER
+
+
+toInfiniteReportForLs :: L.Localizer -> A.Region -> Name.Name -> T.Type -> Report.Report
+toInfiniteReportForLs localizer region name overallType =
+  Report.Report "INFINITE TYPE" region [] $
+    D.stack
+      [
+        D.reflow $
+          "I am inferring a weird self-referential type for " <> Name.toChars name <> ":"
+      ,
+        D.stack
+          [ D.reflow $
+              "Here is my best effort at writing down the type. You will see ∞ for\
+              \ parts of the type that repeat something already printed out infinitely."
+          , D.indent 4 (D.dullyellow (T.toDoc localizer RT.None overallType))
+          , D.reflowLink
+              "Staring at this type is usually not so helpful, so I recommend reading the hints at"
+              "infinite-type"
+              "to get unstuck!"
+          ]
+      ]
