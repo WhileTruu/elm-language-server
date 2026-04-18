@@ -9,10 +9,11 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 ## Features ✨
 
 - 🧭 Go to definition
-- 🔍 Find references
+- 🔍 Find references (supports top level values and infix)
 - 🛡️ Diagnostics (errors and warnings)
 - 🏷️ Document symbols
 - 🧹 Formatting with `elm-format` (enabled when executable is available on init)
+- ✏️ Rename (based on references, supports the same stuff)
 
 ## Configuration
 - `initializationOptions.whiletruu-elm-language-server.elmFormatPath` formatter executable, defaults to `elm-format`
@@ -63,8 +64,8 @@ IDE/editor's LSP integration use the language server:
 - GHC version `9.2.8`
 - Cabal version `3.10.3.0`
 
-### Build 
-`cabal new-build --ghc-option=-split-sections` seems to work! 
+### Build
+`cabal new-build --ghc-option=-split-sections` seems to work!
 
 ### Development
 
