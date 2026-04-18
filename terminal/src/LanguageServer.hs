@@ -159,7 +159,7 @@ run = do
                           let response =
                                 Aeson.object
                                   [ "capabilities" .= Aeson.object
-                                    [ "definitionProvider" .= Aeson.object []
+                                    [ "definitionProvider" .= True
                                     , "documentSymbolProvider" .= True
                                     , "documentFormattingProvider" .= Maybe.isJust elmFormat
                                     , "renameProvider" .= Aeson.object
@@ -172,9 +172,7 @@ run = do
                                          -- https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_didSave
                                          , "save" .= True
                                          ]
-                                    , "referencesProvider" .= Aeson.object
-                                       [ "workDoneProgress" .= True
-                                       ]
+                                    , "referencesProvider" .= True
                                     -- , "hoverProvider" .= Aeson.object
                                     --   [ "workDoneProgress" .= True
                                     --   ]
@@ -389,14 +387,15 @@ run = do
                           loop state
 
                     Right (id, filePath, position) ->
-                      do  sendCreateWorkDoneProgress "go-to-definition-progress"
-                          sendProgressBegin "go-to-definition-progress" "👀 Finding definition"
+                      do  let workDoneToken = "goto-definition"
+                          sendCreateWorkDoneProgress workDoneToken
+                          sendProgressBegin workDoneToken "👀 Finding definition"
 
                           startTime <- Data.Time.getCurrentTime
                           result <- findDefinition state filePath position
                           endTime <- Data.Time.getCurrentTime
 
-                          sendProgressEnd "go-to-definition-progress" $
+                          sendProgressEnd workDoneToken $
                              "Done in " ++ show (Data.Time.diffUTCTime endTime startTime)
 
                           case result of
@@ -436,12 +435,12 @@ run = do
                           loop state
 
                     Right (id, filePath, position) ->
-                      do  -- FIXME: use provided work done token?
-                          -- FIXME: find references appears to fail when a file is deleted
+                      do   -- FIXME: find references appears to fail when a file is deleted
                           -- a reference to the file still exists in elm-stuff and it'll
                           -- continue to fail until elm-stuff is cleared
-                          sendCreateWorkDoneProgress "find-references"
-                          sendProgressBegin "find-references" "🔍 Finding references"
+                          let workDoneToken = "goto-references"
+                          sendCreateWorkDoneProgress workDoneToken
+                          sendProgressBegin workDoneToken "🔍 Finding references"
 
                           startTime <- Data.Time.getCurrentTime
                           result <- Task.run $ findReferences state filePath position
@@ -450,7 +449,7 @@ run = do
 
                           case result of
                             Right references ->
-                              do  sendProgressEnd "find-references" $
+                              do  sendProgressEnd workDoneToken $
                                     "Found " ++ show (length references) ++ " in " ++ show timeDiff
 
                                   respond id
@@ -461,8 +460,8 @@ run = do
                                   loop state
 
                             Left err ->
-                              do  sendProgressEnd "find-references" $
-                                    "Failed " ++ show (length result) ++ " in " ++ show timeDiff
+                              do  sendProgressEnd workDoneToken $
+                                    "Failed to find references in " ++ show timeDiff
 
                                   respondErr id $ Reporting.Exit.toString $
                                     definitionExitToReport filePath err
@@ -537,8 +536,9 @@ run = do
                           loop state
 
                     Right (id, filePath, position, newName) ->
-                      do  sendCreateWorkDoneProgress "rename"
-                          sendProgressBegin "rename" "✏️ Renaming"
+                      do  let workDoneToken = "rename"
+                          sendCreateWorkDoneProgress workDoneToken
+                          sendProgressBegin workDoneToken "✏️ Renaming"
 
                           startTime <- Data.Time.getCurrentTime
                           result <- Task.run $ findReferences state filePath position
@@ -547,7 +547,7 @@ run = do
 
                           case result of
                             Right references ->
-                              do  sendProgressEnd "rename" $
+                              do  sendProgressEnd workDoneToken $
                                     "Found " ++ show (length references) ++ " in " ++ show timeDiff
 
                                   respond id $ Aeson.toJSON $
@@ -555,8 +555,8 @@ run = do
                                   loop state
 
                             Left err ->
-                              do  sendProgressEnd "rename" $
-                                    "Failed " ++ show (length result) ++ " in " ++ show timeDiff
+                              do  sendProgressEnd workDoneToken $
+                                    "Failed to rename in " ++ show timeDiff
 
                                   respondErr id $ Reporting.Exit.toString $
                                     definitionExitToReport filePath err
@@ -650,9 +650,9 @@ run = do
                           loop state
 
                     Right (id, filePath) ->
-                      do  -- FIXME: use provided work done token?
-                          sendCreateWorkDoneProgress "symbols"
-                          sendProgressBegin "symbols" "Finding symbols"
+                      do  let workDoneToken = "document-symbols"
+                          sendCreateWorkDoneProgress workDoneToken
+                          sendProgressBegin workDoneToken "Finding symbols"
 
                           startTime <- Data.Time.getCurrentTime
                           result <- singleFileForSymbols state filePath
@@ -663,7 +663,7 @@ run = do
                             Right singleFile ->
                               do  case _source singleFile of
                                     Right srcMod ->
-                                      do  sendProgressEnd "symbols" $
+                                      do  sendProgressEnd workDoneToken $
                                             "Got result in " ++ show timeDiff
 
                                           respond id $ Aeson.toJSON $ srcModuleSymbols srcMod
@@ -671,12 +671,12 @@ run = do
                                           loop state
 
                                     Left err ->
-                                      do  sendProgressEnd "symbols" $
+                                      do  sendProgressEnd workDoneToken $
                                             "Failed in " ++ show timeDiff
 
                                           loop state
                             Left err ->
-                              do  sendProgressEnd "symbols" $
+                              do  sendProgressEnd workDoneToken $
                                     "Failed " ++ show (length result) ++ " in " ++ show timeDiff
 
                                   respondErr id $ Reporting.Exit.toString $
@@ -2140,8 +2140,9 @@ loadSrcModule state details root moduleName =
                                 (fmap ((,) path) (Parse.fromByteString projectType source))
 
                       else
-                        do  sendCreateWorkDoneProgress "package-download"
-                            sendProgressBegin "package-download" ("⬇️ Downloading " ++ Pkg.toChars pkg ++ "/" ++ Version.toChars vsn)
+                        do  let workDoneToken = "package-download"
+                            sendCreateWorkDoneProgress workDoneToken
+                            sendProgressBegin workDoneToken ("⬇️ Downloading " ++ Pkg.toChars pkg ++ "/" ++ Version.toChars vsn)
 
                             startTime <- Data.Time.getCurrentTime
 
@@ -2151,7 +2152,7 @@ loadSrcModule state details root moduleName =
                             result <- Details.downloadPackage cache manager pkg vsn
 
                             endTime <- Data.Time.getCurrentTime
-                            sendProgressEnd "package-download" $
+                            sendProgressEnd workDoneToken $
                                "Done in " ++ show (Data.Time.diffUTCTime endTime startTime)
 
                             case result of
