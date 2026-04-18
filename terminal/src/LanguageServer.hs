@@ -12,6 +12,7 @@ import qualified Control.Concurrent.MVar
 import qualified Control.Exception as Exception
 import Data.Aeson ((.:), (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Aeson.Key
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Time
 import qualified Data.Bifunctor
@@ -49,6 +50,7 @@ import qualified Build
 import qualified Compile
 
 import qualified Parse.Module as Parse
+import qualified Parse.Variable as Parse
 
 import qualified Reporting
 import qualified Reporting.Doc
@@ -163,6 +165,9 @@ run = do
                                     [ "definitionProvider" .= Aeson.object []
                                     , "documentSymbolProvider" .= True
                                     , "documentFormattingProvider" .= Maybe.isJust elmFormat
+                                    , "renameProvider" .= Aeson.object
+                                       [ "prepareProvider" .= True
+                                       ]
                                     , "textDocumentSync" .= Aeson.object
                                          [ "openClose" .= True
                                          , "change" .= (2 :: Int)
@@ -379,7 +384,7 @@ run = do
                              "Done in " ++ show (Data.Time.diffUTCTime endTime startTime)
 
                           case result of
-                            Right (definitionFilePath, _, A.At region _) ->
+                            Right (definitionFilePath, _, _, A.At region _) ->
                               do  respond id $ encodeRegion definitionFilePath region
                                   loop state
 
@@ -416,6 +421,9 @@ run = do
 
                     Right (id, filePath, position) ->
                       do  -- FIXME: use provided work done token?
+                          -- FIXME: find references appears to fail when a file is deleted
+                          -- a reference to the file still exists in elm-stuff and it'll
+                          -- continue to fail until elm-stuff is cleared
                           sendCreateWorkDoneProgress "find-references"
                           sendProgressBegin "find-references" "🔍 Finding references"
 
@@ -429,11 +437,109 @@ run = do
                               do  sendProgressEnd "find-references" $
                                     "Found " ++ show (length references) ++ " in " ++ show timeDiff
 
-                                  respond id $ Aeson.toJSON $ map (uncurry encodeRegion) references
+                                  respond id
+                                    $ Aeson.toJSON
+                                    $ concatMap (\(fp, regions) ->
+                                        map (encodeRegion fp) regions
+                                      ) (Map.toList references)
                                   loop state
 
                             Left err ->
                               do  sendProgressEnd "find-references" $
+                                    "Failed " ++ show (length result) ++ " in " ++ show timeDiff
+
+                                  respondErr id $ Reporting.Exit.toString $
+                                    definitionExitToReport filePath err
+                                  loop state
+
+            Right "textDocument/prepareRename" ->
+              do  let result =
+                        Aeson.parseEither (\obj ->
+                          do  params <- obj .: "params"
+                              id <- obj .: "id" :: Aeson.Parser Int
+
+                              textDocument <- params .: "textDocument"
+                              uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                              position <- params .: "position"
+                              row <- position .: "line" :: Aeson.Parser Int
+                              column <- position .: "character" :: Aeson.Parser Int
+
+                              let filePath = drop 7 uri
+                              let position = A.Position
+                                               (fromIntegral row + 1)
+                                               (fromIntegral column + 1)
+
+                              return (id, filePath, position)
+                        ) =<< Aeson.eitherDecode body
+
+                  case result of
+                    Left err ->
+                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
+                          loop state
+
+                    Right (id, filePath, position) ->
+                      do  maybeTarget <- prepareRename state filePath position
+                          case maybeTarget of
+                            Just (region, placeholder) ->
+                              do  respond id $
+                                    Aeson.object
+                                      [ "range" .= encodeRange region
+                                      , "placeholder" .=  (placeholder :: String)
+                                      ]
+                                  loop state
+
+                            Nothing ->
+                              do  respond id Aeson.Null
+                                  loop state
+
+            Right "textDocument/rename" ->
+              do  let result =
+                        Aeson.parseEither (\obj ->
+                          do  params <- obj .: "params"
+                              id <- obj .: "id" :: Aeson.Parser Int
+
+                              textDocument <- params .: "textDocument"
+                              uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                              position <- params .: "position"
+                              row <- position .: "line" :: Aeson.Parser Int
+                              column <- position .: "character" :: Aeson.Parser Int
+                              newName <- params .: "newName" :: Aeson.Parser String
+
+                              let filePath = drop 7 uri
+                              let position = A.Position
+                                               (fromIntegral row + 1)
+                                               (fromIntegral column + 1)
+
+                              return (id, filePath, position, newName)
+                        ) =<< Aeson.eitherDecode body
+
+                  case result of
+                    Left err ->
+                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
+                          loop state
+
+                    Right (id, filePath, position, newName) ->
+                      do  sendCreateWorkDoneProgress "rename"
+                          sendProgressBegin "rename" "✏️ Renaming"
+
+                          startTime <- Data.Time.getCurrentTime
+                          result <- Task.run $ findReferences state filePath position
+                          endTime <- Data.Time.getCurrentTime
+                          let timeDiff = Data.Time.diffUTCTime endTime startTime
+
+                          case result of
+                            Right references ->
+                              do  sendProgressEnd "rename" $
+                                    "Found " ++ show (length references) ++ " in " ++ show timeDiff
+
+                                  respond id $ Aeson.toJSON $
+                                     encodeWorkspaceEdit references (Name.fromChars newName)
+                                  loop state
+
+                            Left err ->
+                              do  sendProgressEnd "rename" $
                                     "Failed " ++ show (length result) ++ " in " ++ show timeDiff
 
                                   respondErr id $ Reporting.Exit.toString $
@@ -487,7 +593,7 @@ run = do
 
                                     Right (Exit.ExitSuccess, stdout_, _)->
                                       let
-                                        lines = BSC.split '\n' source 
+                                        lines = BSC.split '\n' source
                                       in
                                       do  respond id $ Aeson.toJSON
                                             [ Aeson.object
@@ -498,7 +604,7 @@ run = do
                                                       ]
                                                   , "end" .= Aeson.object
                                                       [ "line" .= max 0 (length lines - 1)
-                                                      , "character" .= case reverse lines of 
+                                                      , "character" .= case reverse lines of
                                                                          last : _ -> BSC.length last
                                                                          [] -> 0
                                                       ]
@@ -763,6 +869,32 @@ encodeRange (A.Region (A.Position sr sc) (A.Position er ec)) =
     ]
 
 
+encodeTextEdit :: A.Region -> Name -> Aeson.Value
+encodeTextEdit region newName =
+  Aeson.object
+    [ "range" .= encodeRange region
+    , "newText" .= (Name.toChars newName :: String)
+    ]
+
+
+encodeWorkspaceEdit :: Map.Map FilePath [A.Region] -> Name -> Aeson.Value
+encodeWorkspaceEdit changes newName =
+  Aeson.object
+    [ "changes" .= Aeson.object
+        (Map.foldrWithKey
+          (\filePath regions acc ->
+            (
+              Aeson.Key.fromString ("file://" ++ filePath)
+            ,
+              Aeson.toJSON (map (`encodeTextEdit` newName) regions)
+            ) : acc
+          )
+          []
+          changes
+        )
+    ]
+
+
 showMessage :: MessageType -> String -> IO ()
 showMessage messageType message =
   sendNotification "window/showMessage"
@@ -903,7 +1035,7 @@ findDefinition ::
   State
   -> FilePath
   -> A.Position
-  -> IO (Either DefinitionExit (FilePath, Src.Module, Found))
+  -> IO (Either DefinitionExit (FilePath, Src.Module, DefinedEntity, Found))
 findDefinition state filePath position =
   BW.withScope $ \scope ->
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
@@ -929,6 +1061,15 @@ findDefinition state filePath position =
                         Right src_ -> findDefinition_ state details_ root filePath src_ position
 
 
+prepareRename :: State -> FilePath -> A.Position -> IO (Maybe ( A.Region, String ))
+prepareRename state filePath position =
+  do  result <- findDefinition state filePath position
+      case result of
+          Right (_, _, element, _) ->
+            pure $ Just (A.toRegion element, elementToRenamePlaceholder element)
+          _ ->
+            pure Nothing
+
 
 findDefinition_ ::
   State
@@ -937,9 +1078,11 @@ findDefinition_ ::
   -> FilePath
   -> Src.Module
   -> A.Position
-  -> IO (Either DefinitionExit (FilePath, Src.Module, Found))
+  -> IO (Either DefinitionExit (FilePath, Src.Module, DefinedEntity, Found))
 findDefinition_ state details root path src position =
-    let entity =
+    let
+        entity :: Either DefinitionExit DefinedEntity
+        entity =
           maybe (Left DefinitionExitNoDefinedEntity) (\a -> Right a) $
             findDefinedEntityInExports position (Src._exports src)
               <|> findDefinedEntityInValues position (Src._values src)
@@ -950,7 +1093,7 @@ findDefinition_ state details root path src position =
         row = ((\(A.Position row _) -> row) position)
     in
     case entity of
-      Right entity_@(DEVar defs patterns Src.LowVar name) ->
+      Right entity_@(A.At _ (DEVar defs patterns Src.LowVar name)) ->
         -- FIXME: first found exposed low var is returned. Which may or may not be
         -- correct.
         --
@@ -982,44 +1125,44 @@ findDefinition_ state details root path src position =
 
             return $
               case (local, external) of
-                (Just a, _) -> Right (path, src, a)
-                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, fmap FoundValue c)) a
+                (Just a, _) -> Right (path, src, entity_, a)
+                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, entity_, fmap FoundValue c)) a
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
 
-      Right entity_@(DEVarQual _ _ Src.LowVar mod name) ->
+      Right entity_@(A.At _ (DEVarQual _ _ Src.LowVar mod name)) ->
        fmap
          (\a -> a
-           >>= fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
+           >>= fmap (\(a, b, c) -> (a, b, entity_, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
          )
          (findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name)
 
-      Right entity_@(DEVar _ _ Src.CapVar name) ->
+      Right entity_@(A.At _ (DEVar _ _ Src.CapVar name)) ->
         do  let local = findDefinitionForCapVarLocally src name
             external <- findDefinitionForCapVarInImports state details root (Src._imports src) name
 
             return $
               case (local, external) of
-                (Just a, _) -> Right (path, src, a)
-                (Nothing, Right (Just a)) -> Right a
+                (Just a, _) -> Right (path, src, entity_, a)
+                (Nothing, Right (Just a)) -> Right ((\(a1, a2, a3) -> (a1, a2, entity_, a3)) a)
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
 
-      Right entity_@(DEVarQual _ _ Src.CapVar mod name) ->
+      Right entity_@(A.At _ (DEVarQual _ _ Src.CapVar mod name)) ->
          findDefinitionForCapVarQualInImports state details root (Src._imports src) mod name
-         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound entity_)) Right)
+         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound entity_)) (\(a1, a2, a3) -> Right (a1, a2, entity_, a3)))
 
-      Right entity_@(DEInfix name_) ->
+      Right entity_@(A.At _ (DEInfix name_)) ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, fmap FoundInfix c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
+            >>= fmap (\(a, b, c) -> (a, b, entity_, fmap FoundInfix c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
           )
           (findDefinitionForInfixInImports state details root (Src._imports src) name_)
 
-      Right entity_@(DEModuleName name_) ->
+      Right entity_@(A.At _ (DEModuleName name_)) ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, fmap FoundModuleName c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
+            >>= fmap (\(a, b, c) -> (a, b, entity_, fmap FoundModuleName c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
           )
           (findDefinitionForModuleName state details root name_)
 
@@ -1193,7 +1336,7 @@ findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns
 
     inValues =
       foldr
-        (\(A.At _ value@(Src.Value (A.At region valueName) _ _ _)) acc ->
+        (\(A.At region value@(Src.Value (A.At _ valueName) _ _ _)) acc ->
           if valueName == name then Just (A.At region (FoundValue value)) else acc
         )
         Nothing
@@ -1397,9 +1540,12 @@ findDefinitionForNameInPattern name pattern@(A.At _ pattern_) =
     Src.PInt _ -> Nothing
 
 
+type DefinedEntity = A.Located DefinedEntity_
+
 -- FIXME: call it a symbol or sth? References also seem like a good
 -- idea - like a reference to something in some context
-data DefinedEntity
+-- Element <- as per LSP docs for rename?
+data DefinedEntity_
   = DEVar [A.Located Src.Def] [Src.Pattern] Src.VarType Name
   | DEVarQual [A.Located Src.Def] [Src.Pattern] Src.VarType Name Name
   | DEAccess [A.Located Src.Def] [Src.Pattern] Src.Expr Name
@@ -1409,7 +1555,7 @@ data DefinedEntity
 
 definedEntityToStr :: DefinedEntity -> String
 definedEntityToStr entity =
-  case entity of
+  case A.toValue entity of
     DEVar _ _ _ name ->
       Name.toChars name ++ " (Var)"
     DEVarQual _ _ _ prefix name ->
@@ -1421,6 +1567,19 @@ definedEntityToStr entity =
     DEModuleName name ->
       Name.toChars name ++ " (Module)"
 
+elementToRenamePlaceholder :: DefinedEntity -> String
+elementToRenamePlaceholder element =
+  case A.toValue element of
+    DEVar _ _ _ name ->
+      Name.toChars name
+    DEVarQual _ _ _ prefix name ->
+      Name.toChars name
+    DEAccess _ _ record field ->
+      Name.toChars field
+    DEInfix name ->
+      Name.toChars name
+    DEModuleName name ->
+      Name.toChars name
 
 findDefinedEntityInExports :: A.Position -> A.Located Src.Exposing -> Maybe DefinedEntity
 findDefinedEntityInExports pos exposing =
@@ -1433,15 +1592,15 @@ findDefinedEntityInExports pos exposing =
             case a of
               Src.Lower name ->
                 if isInRegion pos (A.toRegion name)
-                  then Just $ DEVar [] [] Src.LowVar (A.toValue name)
+                  then Just $ A.At (A.toRegion name) $ DEVar [] [] Src.LowVar (A.toValue name)
                   else acc
               Src.Upper name _ ->
                 if isInRegion pos (A.toRegion name)
-                  then Just $ DEVar [] [] Src.CapVar (A.toValue name)
+                  then Just $ A.At (A.toRegion name) $ DEVar [] [] Src.CapVar (A.toValue name)
                   else acc
               Src.Operator region name ->
                 if isInRegion pos region
-                  then Just $ DEInfix name
+                  then Just $ A.At region $ DEInfix name
                   else acc
           )
           Nothing
@@ -1456,7 +1615,7 @@ findDefinedEntityInAliases pos aliases =
     (\(A.At region (Src.Alias name _ type_)) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (DEVar [] [] Src.CapVar (A.toValue name))
+              then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
               else Nothing
 
           b = findDefinedEntityInType pos type_
@@ -1473,7 +1632,7 @@ findDefinedEntityInUnions pos unions =
     (\(A.At region (Src.Union name _ variants)) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (DEVar [] [] Src.CapVar (A.toValue name))
+              then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
               else Nothing
 
           b =
@@ -1481,7 +1640,7 @@ findDefinedEntityInUnions pos unions =
               (\(name_, types) found_ ->
                 let a_ =
                       if isInRegion pos (A.toRegion name_)
-                        then Just (DEVar [] [] Src.CapVar (A.toValue name_))
+                        then Just (A.At (A.toRegion name_) (DEVar [] [] Src.CapVar (A.toValue name_)))
                         else Nothing
 
                     b_ =
@@ -1505,13 +1664,13 @@ findDefinedEntityInImports pos imports =
     (\(Src.Import name alias exposing) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (DEModuleName (A.toValue name))
+              then Just (A.At (A.toRegion name) (DEModuleName (A.toValue name)))
               else
                 maybe
                   Nothing
                     (\a ->
                       if isInRegion pos (A.toRegion a)
-                        then Just (DEModuleName (A.toValue name))
+                        then Just (A.At (A.toRegion name) (DEModuleName (A.toValue name)))
                         else Nothing
                     )
                     alias
@@ -1527,17 +1686,17 @@ findDefinedEntityInImports pos imports =
                     case a of
                       Src.Lower name ->
                         if isInRegion pos (A.toRegion name)
-                          then Just (DEVar [] [] Src.CapVar (A.toValue name))
+                          then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
                           else acc
 
                       Src.Upper name _ ->
                         if isInRegion pos (A.toRegion name)
-                          then Just (DEVar [] [] Src.CapVar (A.toValue name))
+                          then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
                           else acc
 
                       Src.Operator region name ->
                         if isInRegion pos region
-                          then Just (DEInfix name)
+                          then Just (A.At region (DEInfix name))
                           else acc
                   )
                   Nothing
@@ -1557,9 +1716,9 @@ findDefinedEntityInValues pos values =
         A.At region (Src.Value name patterns body type_) ->
           let a =
                 if isPositionOnValueName pos located
-                  then Just (DEVar [] [] Src.LowVar (A.toValue name))
+                  then Just (A.At (A.toRegion name) (DEVar [] [] Src.LowVar (A.toValue name)))
                 else if isInRegion pos region
-                  then findDefinedEntityInExpr pos [] patterns (A.toValue body)
+                  then findDefinedEntityInExpr pos [] patterns body
                   else Nothing
 
               b = findDefinedEntityInType pos Control.Monad.=<< type_
@@ -1583,12 +1742,12 @@ findDefinedEntityInType pos type_ =
 
         Src.TType region name tlist ->
           if isInRegion pos region
-            then Just (DEVar [] [] Src.CapVar name)
+            then Just (A.At region (DEVar [] [] Src.CapVar name))
             else foldr (\a acc -> findDefinedEntityInType pos a <|> acc) Nothing tlist
 
         Src.TTypeQual region qual name tlist ->
           if isInRegion pos region
-            then Just (DEVarQual [] [] Src.CapVar qual name)
+            then Just (A.At region (DEVarQual [] [] Src.CapVar qual name))
             else foldr (\a acc -> findDefinedEntityInType pos a <|> acc) Nothing tlist
 
         Src.TRecord fields extRecord ->
@@ -1625,10 +1784,10 @@ findDefinedEntityInExpr
   :: A.Position
   -> [A.Located Src.Def]
   -> [Src.Pattern]
-  -> Src.Expr_
+  -> Src.Expr
   -> Maybe DefinedEntity
-findDefinedEntityInExpr position defs patterns expr =
-  case expr of
+findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
+  case A.toValue expr of
     Src.Chr _ ->
       Nothing
 
@@ -1642,16 +1801,16 @@ findDefinedEntityInExpr position defs patterns expr =
       Nothing
 
     Src.Var varType name ->
-      Just $ DEVar defs patterns varType name
+      Just $ A.At region $ DEVar defs patterns varType name
 
     Src.VarQual varType prefix name ->
-      Just $ DEVarQual defs patterns varType prefix name
+      Just $ A.At region $ DEVarQual defs patterns varType prefix name
 
     Src.List exprs ->
       foldr
         (\a acc ->
           if isInRegion position (A.toRegion a) then
-            findDefinedEntityInExpr position defs patterns (A.toValue a)
+            findDefinedEntityInExpr position defs patterns a
           else
             acc
         )
@@ -1659,24 +1818,24 @@ findDefinedEntityInExpr position defs patterns expr =
         exprs
 
     Src.Op name ->
-      Just $ DEInfix name
+      Just $ A.At region $ DEInfix name
 
     Src.Negate expr ->
       if isInRegion position (A.toRegion expr) then
-        findDefinedEntityInExpr position defs patterns (A.toValue expr)
+        findDefinedEntityInExpr position defs patterns expr
       else
         Nothing
 
     Src.Binops ops final ->
       if isInRegion position (A.toRegion final) then
-        findDefinedEntityInExpr position defs patterns (A.toValue final)
+        findDefinedEntityInExpr position defs patterns final
       else
         foldr
           (\(expr_, op) acc ->
             if isInRegion position (A.toRegion op) then
-              Just $ DEInfix (A.toValue op)
+              Just $ A.At (A.toRegion op) $ DEInfix (A.toValue op)
             else if isInRegion position (A.toRegion expr_) then
-              findDefinedEntityInExpr position defs patterns (A.toValue expr_)
+              findDefinedEntityInExpr position defs patterns expr_
             else
               acc
           )
@@ -1685,34 +1844,34 @@ findDefinedEntityInExpr position defs patterns expr =
 
     Src.Lambda srcArgs body ->
       if isInRegion position (A.toRegion body) then
-        findDefinedEntityInExpr position defs (srcArgs ++ patterns) (A.toValue body)
+        findDefinedEntityInExpr position defs (srcArgs ++ patterns) body
       else
         Nothing
 
     Src.Call func args ->
       if isInRegion position (A.toRegion func) then
-        findDefinedEntityInExpr position defs patterns (A.toValue func)
+        findDefinedEntityInExpr position defs patterns func
       else
         foldr
           (\a acc ->
             if isInRegion position (A.toRegion a) then
-              findDefinedEntityInExpr position defs patterns (A.toValue a)
+              findDefinedEntityInExpr position defs patterns a
             else
               acc
           )
           Nothing
           args
 
-    Src.If branches finally ->
-      if isInRegion position (A.toRegion finally) then
-        findDefinedEntityInExpr position defs patterns (A.toValue finally)
+    Src.If branches finally_ ->
+      if isInRegion position (A.toRegion finally_) then
+        findDefinedEntityInExpr position defs patterns finally_
       else
         foldr
           (\(condition, branch) acc ->
             if isInRegion position (A.toRegion condition) then
-              findDefinedEntityInExpr position defs patterns (A.toValue condition)
+              findDefinedEntityInExpr position defs patterns condition
             else if isInRegion position (A.toRegion branch) then
-              findDefinedEntityInExpr position defs patterns (A.toValue branch)
+              findDefinedEntityInExpr position defs patterns branch
             else
               acc
           )
@@ -1721,14 +1880,14 @@ findDefinedEntityInExpr position defs patterns expr =
 
     Src.Let defs1 body ->
       if isInRegion position (A.toRegion body) then
-        findDefinedEntityInExpr position (defs1 ++ defs) patterns (A.toValue body)
+        findDefinedEntityInExpr position (defs1 ++ defs) patterns body
       else
         foldr
           (\def acc ->
               case (A.toValue def) of
                 Src.Define _ patterns1 expr type_ ->
                   let a = if isInRegion position (A.toRegion expr) then
-                            findDefinedEntityInExpr position (def : defs) (patterns1 ++ patterns) (A.toValue expr)
+                            findDefinedEntityInExpr position (def : defs) (patterns1 ++ patterns) expr
 
                           else
                             acc
@@ -1739,7 +1898,7 @@ findDefinedEntityInExpr position defs patterns expr =
 
                 Src.Destruct pattern expr ->
                   if isInRegion position (A.toRegion expr) then
-                    findDefinedEntityInExpr position (def : defs) (pattern : patterns) (A.toValue expr)
+                    findDefinedEntityInExpr position (def : defs) (pattern : patterns) expr
                   else
                     acc
           )
@@ -1748,12 +1907,12 @@ findDefinedEntityInExpr position defs patterns expr =
 
     Src.Case expr branches ->
       if isInRegion position (A.toRegion expr) then
-        findDefinedEntityInExpr position defs patterns (A.toValue expr)
+        findDefinedEntityInExpr position defs patterns expr
       else
         foldr
           (\(pattern, branch) acc ->
             if isInRegion position (A.toRegion branch) then
-              findDefinedEntityInExpr position defs (pattern : patterns) (A.toValue branch)
+              findDefinedEntityInExpr position defs (pattern : patterns) branch
             else
               acc
           )
@@ -1765,23 +1924,23 @@ findDefinedEntityInExpr position defs patterns expr =
 
     Src.Access record field ->
       if isInRegion position (A.toRegion field) then
-        Just $ DEAccess defs patterns record (A.toValue field)
+        Just $ A.At (A.toRegion field) $ DEAccess defs patterns record (A.toValue field)
       else if isInRegion position (A.toRegion record) then
-        findDefinedEntityInExpr position defs patterns (A.toValue record)
+        findDefinedEntityInExpr position defs patterns record
       else
         Nothing
 
     Src.Update starter fields ->
       if isInRegion position (A.toRegion starter) then
-        Just $ DEVar defs patterns Src.LowVar (A.toValue starter)
+        Just $ A.At (A.toRegion starter) $ DEVar defs patterns Src.LowVar (A.toValue starter)
 
       else
         foldr
           (\(field, value) acc ->
             if isInRegion position (A.toRegion field) then
-              Just $ DEVar defs patterns Src.LowVar (A.toValue field)
+              Just $ A.At (A.toRegion field) $ DEVar defs patterns Src.LowVar (A.toValue field)
             else if isInRegion position (A.toRegion value) then
-              findDefinedEntityInExpr position defs patterns (A.toValue value)
+              findDefinedEntityInExpr position defs patterns value
             else
               acc
           )
@@ -1792,7 +1951,7 @@ findDefinedEntityInExpr position defs patterns expr =
       foldr
         (\(field, value) acc ->
           if isInRegion position (A.toRegion value) then
-            findDefinedEntityInExpr position defs patterns (A.toValue value)
+            findDefinedEntityInExpr position defs patterns value
           else
             acc
         )
@@ -1806,7 +1965,7 @@ findDefinedEntityInExpr position defs patterns expr =
       foldr
         (\expr exprs ->
           if isInRegion position (A.toRegion expr) then
-            findDefinedEntityInExpr position defs patterns (A.toValue expr)
+            findDefinedEntityInExpr position defs patterns expr
           else
             exprs
         )
@@ -1821,7 +1980,7 @@ findDefinedEntityInExpr position defs patterns expr =
 -- REFERENCES
 
 
-findReferences :: State -> FilePath -> A.Position -> Task.Task DefinitionExit [(FilePath, A.Region)]
+findReferences :: State -> FilePath -> A.Position -> Task.Task DefinitionExit (Map.Map FilePath [A.Region])
 findReferences state filePath position =
   Task.eio id $ BW.withScope $ \scope -> Task.run $
   do  maybeRoot <- Task.io $ Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
@@ -1843,10 +2002,20 @@ findReferences state filePath position =
               definition <- Task.eio id $ findDefinition_ state details root filePath localSrc position
 
               case definition of
-                (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) ->
+                (modulePath, defSrc, _, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) ->
                   do  let importers = importersOf details (Src.getName defSrc)
 
-                      let localRefs = map (\a -> (modulePath, a)) (varInModule (A.toValue name) defSrc)
+                      let localRefs =
+                            Map.singleton modulePath
+                              (
+                                varInModule (A.toValue name) defSrc
+                                ++ valueRegions (A.At defRegion value)
+                                ++
+                                  (
+                                    findNameInExposing (A.toValue name) (A.toValue (Src._exports defSrc))
+                                      & maybe [] (\a -> [a])
+                                  )
+                              )
 
                       foldr
                         (\a acc ->
@@ -1855,30 +2024,32 @@ findReferences state filePath position =
 
                               let newRefs =
                                     case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports importerSrc) of
-                                      Just import_@(Src.Import _ alias _) ->
-                                        if isLowVarExposed import_ (A.toValue name) then
-                                            varInModule (A.toValue name) importerSrc ++
+                                      Just import_@(Src.Import _ alias exposing) ->
+                                        case findNameInExposing (A.toValue name) exposing of
+                                          Just importRegion ->
+                                            importRegion :
+                                              varInModule (A.toValue name) importerSrc ++
                                               varQualInModule
                                                 (Maybe.fromMaybe (Src.getImportName import_) (fmap A.toValue alias))
                                                 (A.toValue name)
                                                 importerSrc
 
-                                          else
+                                          Nothing ->
                                             varQualInModule
                                               (Maybe.fromMaybe (Src.getImportName import_) (fmap A.toValue alias))
                                               (A.toValue name) importerSrc
 
                                       Nothing -> []
 
-                              return (foundRefs ++ map (\a -> (importerPath, a)) newRefs)
+                              return $ Map.insert importerPath newRefs foundRefs
                         )
                         (return localRefs)
                         importers
 
-                (modulePath, defSrc, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
+                (modulePath, defSrc, _, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
                   do  let importers = importersOf details (Src.getName defSrc)
 
-                      let localRefs = map (\a -> (modulePath, a)) (infixInModule name localSrc)
+                      let localRefs = Map.singleton modulePath (infixInModule name localSrc)
 
                       foldr
                         (\a acc ->
@@ -1895,13 +2066,13 @@ findReferences state filePath position =
 
                                       Nothing -> []
 
-                              return (foundRefs ++ map (\a -> (importerPath, a)) newRefs)
+                              return $ Map.insert importerPath newRefs foundRefs
                         )
                         (return localRefs)
                         importers
 
                 _ ->
-                  return []
+                  return Map.empty
 
 
 loadSrcModule :: State -> Details.Details -> FilePath -> ModuleName.Raw -> IO (Either DefinitionExit (FilePath, Src.Module))
@@ -2059,6 +2230,38 @@ varInModule name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
       values
 
 
+valueRegions :: A.Located Src.Value -> [A.Region]
+valueRegions (A.At region (Src.Value name _ _ type_)) =
+  case type_ of
+    Just _ ->
+      [ let
+          (A.Region (A.Position startRow _) _) = region
+          nameLength = fromIntegral (length (Name.toChars (A.toValue name)))
+        in
+        A.Region (A.Position startRow 1) (A.Position startRow (nameLength + 1))
+      , A.toRegion name
+      ]
+
+    Nothing ->
+      [ A.toRegion name ]
+
+
+findNameInExposing :: Name -> Src.Exposing -> Maybe A.Region
+findNameInExposing name exposing =
+  case exposing of
+    Src.Open -> Nothing
+    Src.Explicit exposed ->
+      foldr (\a found -> found <|> findNameInExposed name a) Nothing exposed
+
+
+findNameInExposed :: Name -> Src.Exposed ->  Maybe A.Region
+findNameInExposed name exposed =
+  case exposed of
+    Src.Lower (A.At region name_) -> if name == name_ then Just region else Nothing
+    Src.Upper _ _ -> Nothing
+    Src.Operator _ _ -> Nothing
+
+
 varInExpr :: Name -> [A.Region] -> Src.Expr -> [A.Region]
 varInExpr name foundRegions (A.At region expr_) =
     case expr_ of
@@ -2151,6 +2354,15 @@ varQualInModule qual name srcMod@(Src.Module _ _ _ _ values _ _ _ _) =
         varQualInExpr qual name [] expr
       )
       values
+      & map (\a -> keepOnlyNameRegionInVarQualRegion a name)
+
+
+keepOnlyNameRegionInVarQualRegion :: A.Region -> Name -> A.Region
+keepOnlyNameRegionInVarQualRegion (A.Region _ (A.Position endRow endCol)) name =
+  let
+    nameLength = fromIntegral (length (Name.toChars name))
+  in
+  A.Region (A.Position endRow (endCol - nameLength)) (A.Position endRow endCol)
 
 
 varQualInExpr :: Name -> Name -> [A.Region] -> Src.Expr -> [A.Region]
