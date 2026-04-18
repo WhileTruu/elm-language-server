@@ -957,11 +957,11 @@ data DefinitionExit
   = DefinitionExitBadDetails Reporting.Exit.Details
   | DefinitionExitBadInput BS.ByteString Reporting.Error.Error
   | DefinitionExitNoRoot
-  | DefinitionExitNotFound DefinedEntity
-  | DefinitionExitNoDefinedEntity
+  | DefinitionExitNotFound Element
+  | DefinitionExitNoElement
   | DefinitionExitModuleNotFound FilePath ModuleName.Raw
   | DefinitionExitNoFile FilePath
-  | DefinitionExitNoProperModName DefinedEntity
+  | DefinitionExitNoProperModName Element
   | DefinitionExitBadDownload Pkg.Name Version.Version Reporting.Exit.PackageProblem
 
 
@@ -983,15 +983,15 @@ definitionExitToReport path exit =
             \ the version in there based on the API changes."
         ]
 
-    DefinitionExitNotFound entity ->
+    DefinitionExitNotFound element ->
       -- FIXME: Add info about where looked for the definition in?
       Reporting.Exit.Help.report "NO DEFINITION" Nothing
-        ("I tried to find the definition for " ++ definedEntityToStr entity ++ ", but failed to find it.")
+        ("I tried to find the definition for " ++ elementToStr element ++ ", but failed to find it.")
         []
 
-    DefinitionExitNoDefinedEntity ->
-      Reporting.Exit.Help.report "NO DEFINED ENTITY UNDER CURSOR" Nothing
-        "I tried to find a defined entity under the cursor, but could not."
+    DefinitionExitNoElement ->
+      Reporting.Exit.Help.report "NO ELEMENT UNDER CURSOR" Nothing
+        "I tried to find an element under the cursor, but could not."
         []
 
     DefinitionExitModuleNotFound root moduleName ->
@@ -1008,9 +1008,9 @@ definitionExitToReport path exit =
             \ again to get the files to show up there."
         ]
 
-    DefinitionExitNoProperModName entity ->
+    DefinitionExitNoProperModName element ->
       Reporting.Exit.Help.report "NO PROPER MODULE NAME" Nothing
-        ("I tried to find the definition for " ++ definedEntityToStr entity ++ ", but failed to find it.")
+        ("I tried to find the definition for " ++ elementToStr element ++ ", but failed to find it.")
         []
 
     DefinitionExitBadDownload pkg vsn packageProblem ->
@@ -1035,7 +1035,7 @@ findDefinition ::
   State
   -> FilePath
   -> A.Position
-  -> IO (Either DefinitionExit (FilePath, Src.Module, DefinedEntity, Found))
+  -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
 findDefinition state filePath position =
   BW.withScope $ \scope ->
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
@@ -1078,22 +1078,19 @@ findDefinition_ ::
   -> FilePath
   -> Src.Module
   -> A.Position
-  -> IO (Either DefinitionExit (FilePath, Src.Module, DefinedEntity, Found))
+  -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
 findDefinition_ state details root path src position =
     let
-        entity :: Either DefinitionExit DefinedEntity
-        entity =
-          maybe (Left DefinitionExitNoDefinedEntity) (\a -> Right a) $
-            findDefinedEntityInExports position (Src._exports src)
-              <|> findDefinedEntityInValues position (Src._values src)
-              <|> findDefinedEntityInAliases position (Src._aliases src)
-              <|> findDefinedEntityInUnions position (Src._unions src)
-              <|> findDefinedEntityInImports position (Src._imports src)
-
-        row = ((\(A.Position row _) -> row) position)
+        element :: Maybe Element
+        element =
+          findElementInExports position (Src._exports src) <|>
+          findElementInValues position (Src._values src) <|>
+          findElementInAliases position (Src._aliases src) <|>
+          findElementInUnions position (Src._unions src) <|>
+          findElementInImports position (Src._imports src)
     in
-    case entity of
-      Right entity_@(A.At _ (DEVar defs patterns Src.LowVar name)) ->
+    case element of
+      Just element_@(A.At _ (EVar defs patterns Src.LowVar name)) ->
         -- FIXME: first found exposed low var is returned. Which may or may not be
         -- correct.
         --
@@ -1125,52 +1122,52 @@ findDefinition_ state details root path src position =
 
             return $
               case (local, external) of
-                (Just a, _) -> Right (path, src, entity_, a)
-                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, entity_, fmap FoundValue c)) a
+                (Just a, _) -> Right (path, src, element_, a)
+                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, element_, fmap FoundValue c)) a
                 (Nothing, Left a) -> Left a
-                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
+                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element_)
 
-      Right entity_@(A.At _ (DEVarQual _ _ Src.LowVar mod name)) ->
+      Just element_@(A.At _ (EVarQual _ _ Src.LowVar mod name)) ->
        fmap
          (\a -> a
-           >>= fmap (\(a, b, c) -> (a, b, entity_, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
+           >>= fmap (\(a, b, c) -> (a, b, element_, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound element_)) Right
          )
          (findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name)
 
-      Right entity_@(A.At _ (DEVar _ _ Src.CapVar name)) ->
+      Just element_@(A.At _ (EVar _ _ Src.CapVar name)) ->
         do  let local = findDefinitionForCapVarLocally src name
             external <- findDefinitionForCapVarInImports state details root (Src._imports src) name
 
             return $
               case (local, external) of
-                (Just a, _) -> Right (path, src, entity_, a)
-                (Nothing, Right (Just a)) -> Right ((\(a1, a2, a3) -> (a1, a2, entity_, a3)) a)
+                (Just a, _) -> Right (path, src, element_, a)
+                (Nothing, Right (Just a)) -> Right ((\(a1, a2, a3) -> (a1, a2, element_, a3)) a)
                 (Nothing, Left a) -> Left a
-                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound entity_)
+                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element_)
 
-      Right entity_@(A.At _ (DEVarQual _ _ Src.CapVar mod name)) ->
+      Just element_@(A.At _ (EVarQual _ _ Src.CapVar mod name)) ->
          findDefinitionForCapVarQualInImports state details root (Src._imports src) mod name
-         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound entity_)) (\(a1, a2, a3) -> Right (a1, a2, entity_, a3)))
+         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound element_)) (\(a1, a2, a3) -> Right (a1, a2, element_, a3)))
 
-      Right entity_@(A.At _ (DEInfix name_)) ->
+      Just element_@(A.At _ (EInfix name_)) ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, entity_, fmap FoundInfix c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
+            >>= fmap (\(a, b, c) -> (a, b, element_, fmap FoundInfix c)) . maybe (Left (DefinitionExitNotFound element_)) Right
           )
           (findDefinitionForInfixInImports state details root (Src._imports src) name_)
 
-      Right entity_@(A.At _ (DEModuleName name_)) ->
+      Just element_@(A.At _ (EModuleName name_)) ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, entity_, fmap FoundModuleName c)) . maybe (Left (DefinitionExitNotFound entity_)) Right
+            >>= fmap (\(a, b, c) -> (a, b, element_, fmap FoundModuleName c)) . maybe (Left (DefinitionExitNotFound element_)) Right
           )
           (findDefinitionForModuleName state details root name_)
 
-      Right entity ->
-        return $ Left $ DefinitionExitNotFound entity
+      Just element_ ->
+        return $ Left $ DefinitionExitNotFound element_
 
-      Left exit ->
-        return $ Left exit
+      Nothing ->
+        return $ Left DefinitionExitNoElement
 
 
 findDefinitionForModuleName ::
@@ -1540,49 +1537,48 @@ findDefinitionForNameInPattern name pattern@(A.At _ pattern_) =
     Src.PInt _ -> Nothing
 
 
-type DefinedEntity = A.Located DefinedEntity_
-
--- FIXME: call it a symbol or sth? References also seem like a good
--- idea - like a reference to something in some context
--- Element <- as per LSP docs for rename?
-data DefinedEntity_
-  = DEVar [A.Located Src.Def] [Src.Pattern] Src.VarType Name
-  | DEVarQual [A.Located Src.Def] [Src.Pattern] Src.VarType Name Name
-  | DEAccess [A.Located Src.Def] [Src.Pattern] Src.Expr Name
-  | DEInfix Name
-  | DEModuleName Name
+type Element = A.Located Element_
 
 
-definedEntityToStr :: DefinedEntity -> String
-definedEntityToStr entity =
-  case A.toValue entity of
-    DEVar _ _ _ name ->
+data Element_
+  = EVar [A.Located Src.Def] [Src.Pattern] Src.VarType Name
+  | EVarQual [A.Located Src.Def] [Src.Pattern] Src.VarType Name Name
+  | EAccess [A.Located Src.Def] [Src.Pattern] Src.Expr Name
+  | EInfix Name
+  | EModuleName Name
+
+
+elementToStr :: Element -> String
+elementToStr element =
+  case A.toValue element of
+    EVar _ _ _ name ->
       Name.toChars name ++ " (Var)"
-    DEVarQual _ _ _ prefix name ->
+    EVarQual _ _ _ prefix name ->
       Name.toChars prefix ++ "." ++ Name.toChars name ++ " (VarQual)"
-    DEAccess _ _ record field ->
+    EAccess _ _ record field ->
       "." ++ Name.toChars field ++ " (Access)"
-    DEInfix name ->
+    EInfix name ->
       Name.toChars name ++ " (Infix)"
-    DEModuleName name ->
+    EModuleName name ->
       Name.toChars name ++ " (Module)"
 
-elementToRenamePlaceholder :: DefinedEntity -> String
+elementToRenamePlaceholder :: Element -> String
 elementToRenamePlaceholder element =
   case A.toValue element of
-    DEVar _ _ _ name ->
+    EVar _ _ _ name ->
       Name.toChars name
-    DEVarQual _ _ _ prefix name ->
+    EVarQual _ _ _ prefix name ->
       Name.toChars name
-    DEAccess _ _ record field ->
+    EAccess _ _ record field ->
       Name.toChars field
-    DEInfix name ->
+    EInfix name ->
       Name.toChars name
-    DEModuleName name ->
+    EModuleName name ->
       Name.toChars name
 
-findDefinedEntityInExports :: A.Position -> A.Located Src.Exposing -> Maybe DefinedEntity
-findDefinedEntityInExports pos exposing =
+
+findElementInExports :: A.Position -> A.Located Src.Exposing -> Maybe Element
+findElementInExports pos exposing =
   if isInRegion pos (A.toRegion exposing) then
     case A.toValue exposing of
       Src.Open -> Nothing
@@ -1592,15 +1588,15 @@ findDefinedEntityInExports pos exposing =
             case a of
               Src.Lower name ->
                 if isInRegion pos (A.toRegion name)
-                  then Just $ A.At (A.toRegion name) $ DEVar [] [] Src.LowVar (A.toValue name)
+                  then Just $ A.At (A.toRegion name) $ EVar [] [] Src.LowVar (A.toValue name)
                   else acc
               Src.Upper name _ ->
                 if isInRegion pos (A.toRegion name)
-                  then Just $ A.At (A.toRegion name) $ DEVar [] [] Src.CapVar (A.toValue name)
+                  then Just $ A.At (A.toRegion name) $ EVar [] [] Src.CapVar (A.toValue name)
                   else acc
               Src.Operator region name ->
                 if isInRegion pos region
-                  then Just $ A.At region $ DEInfix name
+                  then Just $ A.At region $ EInfix name
                   else acc
           )
           Nothing
@@ -1609,16 +1605,16 @@ findDefinedEntityInExports pos exposing =
     Nothing
 
 
-findDefinedEntityInAliases :: A.Position -> [A.Located Src.Alias] -> Maybe DefinedEntity
-findDefinedEntityInAliases pos aliases =
+findElementInAliases :: A.Position -> [A.Located Src.Alias] -> Maybe Element
+findElementInAliases pos aliases =
   foldr
     (\(A.At region (Src.Alias name _ type_)) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
+              then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
               else Nothing
 
-          b = findDefinedEntityInType pos type_
+          b = findElementInType pos type_
       in
       a <|> b <|> found
     )
@@ -1626,13 +1622,13 @@ findDefinedEntityInAliases pos aliases =
     aliases
 
 
-findDefinedEntityInUnions :: A.Position -> [A.Located Src.Union] -> Maybe DefinedEntity
-findDefinedEntityInUnions pos unions =
+findElementInUnions :: A.Position -> [A.Located Src.Union] -> Maybe Element
+findElementInUnions pos unions =
   foldr
     (\(A.At region (Src.Union name _ variants)) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
+              then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
               else Nothing
 
           b =
@@ -1640,11 +1636,11 @@ findDefinedEntityInUnions pos unions =
               (\(name_, types) found_ ->
                 let a_ =
                       if isInRegion pos (A.toRegion name_)
-                        then Just (A.At (A.toRegion name_) (DEVar [] [] Src.CapVar (A.toValue name_)))
+                        then Just (A.At (A.toRegion name_) (EVar [] [] Src.CapVar (A.toValue name_)))
                         else Nothing
 
                     b_ =
-                      foldr (\a acc -> findDefinedEntityInType pos a <|> acc) Nothing types
+                      foldr (\a acc -> findElementInType pos a <|> acc) Nothing types
                 in
                 a_ <|> b_ <|> found_
 
@@ -1658,19 +1654,19 @@ findDefinedEntityInUnions pos unions =
     unions
 
 
-findDefinedEntityInImports :: A.Position -> [Src.Import] -> Maybe DefinedEntity
-findDefinedEntityInImports pos imports =
+findElementInImports :: A.Position -> [Src.Import] -> Maybe Element
+findElementInImports pos imports =
   foldr
     (\(Src.Import name alias exposing) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (A.At (A.toRegion name) (DEModuleName (A.toValue name)))
+              then Just (A.At (A.toRegion name) (EModuleName (A.toValue name)))
               else
                 maybe
                   Nothing
                     (\a ->
                       if isInRegion pos (A.toRegion a)
-                        then Just (A.At (A.toRegion name) (DEModuleName (A.toValue name)))
+                        then Just (A.At (A.toRegion name) (EModuleName (A.toValue name)))
                         else Nothing
                     )
                     alias
@@ -1686,17 +1682,17 @@ findDefinedEntityInImports pos imports =
                     case a of
                       Src.Lower name ->
                         if isInRegion pos (A.toRegion name)
-                          then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
+                          then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
                           else acc
 
                       Src.Upper name _ ->
                         if isInRegion pos (A.toRegion name)
-                          then Just (A.At (A.toRegion name) (DEVar [] [] Src.CapVar (A.toValue name)))
+                          then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
                           else acc
 
                       Src.Operator region name ->
                         if isInRegion pos region
-                          then Just (A.At region (DEInfix name))
+                          then Just (A.At region (EInfix name))
                           else acc
                   )
                   Nothing
@@ -1708,20 +1704,20 @@ findDefinedEntityInImports pos imports =
     imports
 
 
-findDefinedEntityInValues :: A.Position -> [A.Located Src.Value] -> Maybe DefinedEntity
-findDefinedEntityInValues pos values =
+findElementInValues :: A.Position -> [A.Located Src.Value] -> Maybe Element
+findElementInValues pos values =
   foldr
     (\located found ->
       case located of
         A.At region (Src.Value name patterns body type_) ->
           let a =
                 if isPositionOnValueName pos located
-                  then Just (A.At (A.toRegion name) (DEVar [] [] Src.LowVar (A.toValue name)))
+                  then Just (A.At (A.toRegion name) (EVar [] [] Src.LowVar (A.toValue name)))
                 else if isInRegion pos region
-                  then findDefinedEntityInExpr pos [] patterns body
-                  else Nothing
+                  then findElementInExpr pos [] patterns body
+                else Nothing
 
-              b = findDefinedEntityInType pos Control.Monad.=<< type_
+              b = findElementInType pos Control.Monad.=<< type_
           in
           a <|> b <|> found
     )
@@ -1729,35 +1725,35 @@ findDefinedEntityInValues pos values =
     values
 
 
-findDefinedEntityInType :: A.Position -> Src.Type -> Maybe DefinedEntity
-findDefinedEntityInType pos type_ =
+findElementInType :: A.Position -> Src.Type -> Maybe Element
+findElementInType pos type_ =
   if isInRegion pos (A.toRegion type_)
     then
       case A.toValue type_ of
         Src.TLambda arg ret ->
-          findDefinedEntityInType pos arg <|> findDefinedEntityInType pos ret
+          findElementInType pos arg <|> findElementInType pos ret
 
         Src.TVar name ->
           Nothing
 
         Src.TType region name tlist ->
           if isInRegion pos region
-            then Just (A.At region (DEVar [] [] Src.CapVar name))
-            else foldr (\a acc -> findDefinedEntityInType pos a <|> acc) Nothing tlist
+            then Just (A.At region (EVar [] [] Src.CapVar name))
+            else foldr (\a acc -> findElementInType pos a <|> acc) Nothing tlist
 
         Src.TTypeQual region qual name tlist ->
           if isInRegion pos region
-            then Just (A.At region (DEVarQual [] [] Src.CapVar qual name))
-            else foldr (\a acc -> findDefinedEntityInType pos a <|> acc) Nothing tlist
+            then Just (A.At region (EVarQual [] [] Src.CapVar qual name))
+            else foldr (\a acc -> findElementInType pos a <|> acc) Nothing tlist
 
         Src.TRecord fields extRecord ->
-            foldr (\a acc -> findDefinedEntityInType pos (snd a) <|> acc) Nothing fields
+            foldr (\a acc -> findElementInType pos (snd a) <|> acc) Nothing fields
 
         Src.TUnit ->
           Nothing
 
         Src.TTuple a b rest ->
-            foldr (\a acc -> findDefinedEntityInType pos a <|> acc) Nothing (a : b : rest)
+            foldr (\a acc -> findElementInType pos a <|> acc) Nothing (a : b : rest)
 
     else
       Nothing
@@ -1780,13 +1776,13 @@ isInRegion (A.Position row col) (A.Region (A.Position startRow startCol) (A.Posi
     && (row == endRow && col <= endCol || row < endRow)
 
 
-findDefinedEntityInExpr
+findElementInExpr
   :: A.Position
   -> [A.Located Src.Def]
   -> [Src.Pattern]
   -> Src.Expr
-  -> Maybe DefinedEntity
-findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
+  -> Maybe Element
+findElementInExpr position defs patterns expr@(A.At region _) =
   case A.toValue expr of
     Src.Chr _ ->
       Nothing
@@ -1801,16 +1797,16 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
       Nothing
 
     Src.Var varType name ->
-      Just $ A.At region $ DEVar defs patterns varType name
+      Just $ A.At region $ EVar defs patterns varType name
 
     Src.VarQual varType prefix name ->
-      Just $ A.At region $ DEVarQual defs patterns varType prefix name
+      Just $ A.At region $ EVarQual defs patterns varType prefix name
 
     Src.List exprs ->
       foldr
         (\a acc ->
           if isInRegion position (A.toRegion a) then
-            findDefinedEntityInExpr position defs patterns a
+            findElementInExpr position defs patterns a
           else
             acc
         )
@@ -1818,24 +1814,24 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
         exprs
 
     Src.Op name ->
-      Just $ A.At region $ DEInfix name
+      Just $ A.At region $ EInfix name
 
     Src.Negate expr ->
       if isInRegion position (A.toRegion expr) then
-        findDefinedEntityInExpr position defs patterns expr
+        findElementInExpr position defs patterns expr
       else
         Nothing
 
     Src.Binops ops final ->
       if isInRegion position (A.toRegion final) then
-        findDefinedEntityInExpr position defs patterns final
+        findElementInExpr position defs patterns final
       else
         foldr
           (\(expr_, op) acc ->
             if isInRegion position (A.toRegion op) then
-              Just $ A.At (A.toRegion op) $ DEInfix (A.toValue op)
+              Just $ A.At (A.toRegion op) $ EInfix (A.toValue op)
             else if isInRegion position (A.toRegion expr_) then
-              findDefinedEntityInExpr position defs patterns expr_
+              findElementInExpr position defs patterns expr_
             else
               acc
           )
@@ -1844,18 +1840,18 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
 
     Src.Lambda srcArgs body ->
       if isInRegion position (A.toRegion body) then
-        findDefinedEntityInExpr position defs (srcArgs ++ patterns) body
+        findElementInExpr position defs (srcArgs ++ patterns) body
       else
         Nothing
 
     Src.Call func args ->
       if isInRegion position (A.toRegion func) then
-        findDefinedEntityInExpr position defs patterns func
+        findElementInExpr position defs patterns func
       else
         foldr
           (\a acc ->
             if isInRegion position (A.toRegion a) then
-              findDefinedEntityInExpr position defs patterns a
+              findElementInExpr position defs patterns a
             else
               acc
           )
@@ -1864,14 +1860,14 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
 
     Src.If branches finally_ ->
       if isInRegion position (A.toRegion finally_) then
-        findDefinedEntityInExpr position defs patterns finally_
+        findElementInExpr position defs patterns finally_
       else
         foldr
           (\(condition, branch) acc ->
             if isInRegion position (A.toRegion condition) then
-              findDefinedEntityInExpr position defs patterns condition
+              findElementInExpr position defs patterns condition
             else if isInRegion position (A.toRegion branch) then
-              findDefinedEntityInExpr position defs patterns branch
+              findElementInExpr position defs patterns branch
             else
               acc
           )
@@ -1880,25 +1876,25 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
 
     Src.Let defs1 body ->
       if isInRegion position (A.toRegion body) then
-        findDefinedEntityInExpr position (defs1 ++ defs) patterns body
+        findElementInExpr position (defs1 ++ defs) patterns body
       else
         foldr
           (\def acc ->
               case (A.toValue def) of
                 Src.Define _ patterns1 expr type_ ->
                   let a = if isInRegion position (A.toRegion expr) then
-                            findDefinedEntityInExpr position (def : defs) (patterns1 ++ patterns) expr
+                            findElementInExpr position (def : defs) (patterns1 ++ patterns) expr
 
                           else
                             acc
 
-                      b = findDefinedEntityInType position Control.Monad.=<< type_
+                      b = findElementInType position Control.Monad.=<< type_
                   in
                   a <|> b <|> acc
 
                 Src.Destruct pattern expr ->
                   if isInRegion position (A.toRegion expr) then
-                    findDefinedEntityInExpr position (def : defs) (pattern : patterns) expr
+                    findElementInExpr position (def : defs) (pattern : patterns) expr
                   else
                     acc
           )
@@ -1907,12 +1903,12 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
 
     Src.Case expr branches ->
       if isInRegion position (A.toRegion expr) then
-        findDefinedEntityInExpr position defs patterns expr
+        findElementInExpr position defs patterns expr
       else
         foldr
           (\(pattern, branch) acc ->
             if isInRegion position (A.toRegion branch) then
-              findDefinedEntityInExpr position defs (pattern : patterns) branch
+              findElementInExpr position defs (pattern : patterns) branch
             else
               acc
           )
@@ -1924,23 +1920,23 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
 
     Src.Access record field ->
       if isInRegion position (A.toRegion field) then
-        Just $ A.At (A.toRegion field) $ DEAccess defs patterns record (A.toValue field)
+        Just $ A.At (A.toRegion field) $ EAccess defs patterns record (A.toValue field)
       else if isInRegion position (A.toRegion record) then
-        findDefinedEntityInExpr position defs patterns record
+        findElementInExpr position defs patterns record
       else
         Nothing
 
     Src.Update starter fields ->
       if isInRegion position (A.toRegion starter) then
-        Just $ A.At (A.toRegion starter) $ DEVar defs patterns Src.LowVar (A.toValue starter)
+        Just $ A.At (A.toRegion starter) $ EVar defs patterns Src.LowVar (A.toValue starter)
 
       else
         foldr
           (\(field, value) acc ->
             if isInRegion position (A.toRegion field) then
-              Just $ A.At (A.toRegion field) $ DEVar defs patterns Src.LowVar (A.toValue field)
+              Just $ A.At (A.toRegion field) $ EVar defs patterns Src.LowVar (A.toValue field)
             else if isInRegion position (A.toRegion value) then
-              findDefinedEntityInExpr position defs patterns value
+              findElementInExpr position defs patterns value
             else
               acc
           )
@@ -1951,7 +1947,7 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
       foldr
         (\(field, value) acc ->
           if isInRegion position (A.toRegion value) then
-            findDefinedEntityInExpr position defs patterns value
+            findElementInExpr position defs patterns value
           else
             acc
         )
@@ -1965,7 +1961,7 @@ findDefinedEntityInExpr position defs patterns expr@(A.At region _) =
       foldr
         (\expr exprs ->
           if isInRegion position (A.toRegion expr) then
-            findDefinedEntityInExpr position defs patterns expr
+            findElementInExpr position defs patterns expr
           else
             exprs
         )
