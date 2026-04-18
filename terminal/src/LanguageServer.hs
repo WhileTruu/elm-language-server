@@ -129,9 +129,6 @@ run = do
                   IO.hFlush IO.stderr
                   loop state
 
-            Right "initialized" ->
-              do  loop state
-
             Right "initialize" ->
               do  let result =
                         Aeson.parseEither (\obj ->
@@ -191,6 +188,25 @@ run = do
                           respond id response
 
                           loop state
+
+            Right "initialized" ->
+              do  loop state
+
+            Right "shutdown" ->
+              do  let result = Aeson.parseEither (\obj -> obj .: "id") =<< Aeson.eitherDecode body
+
+                  case result of
+                    Left err ->
+                      do  IO.hPutStr IO.stderr $ "Error decoding JSON: " ++ err
+                          IO.hFlush IO.stderr
+                          loop state
+
+                    Right id ->
+                      do  respond id Aeson.Null
+                          loop state
+
+            Right "exit" ->
+              Exit.exitSuccess
 
             Right "textDocument/didOpen" ->
               do  let result =
