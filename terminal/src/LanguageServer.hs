@@ -2031,29 +2031,38 @@ findReferences state filePath position =
 
                       foldr
                         (\a acc ->
-                          do  (importerPath, importerSrc) <- Task.eio id $ loadSrcModule state details root a
-                              foundRefs <- acc
+                          do  loadResult <- Task.io $ loadSrcModule state details root a
+                              case loadResult of
+                                  Left _ ->
+                                    -- Ignore file not found - importersOf can return
+                                    -- importers for deleted files since Details are loaded
+                                    -- from elm-stuff
+                                    acc
 
-                              let newRefs =
-                                    case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports importerSrc) of
-                                      Just import_@(Src.Import _ alias exposing) ->
-                                        case findNameInExposing (A.toValue name) exposing of
-                                          Just importRegion ->
-                                            importRegion :
-                                              varInModule (A.toValue name) importerSrc ++
-                                              varQualInModule
-                                                (Maybe.fromMaybe (Src.getImportName import_) (fmap A.toValue alias))
-                                                (A.toValue name)
-                                                importerSrc
+                                  Right (importerPath, importerSrc) -> do
+                                    foundRefs <- acc
 
-                                          Nothing ->
-                                            varQualInModule
-                                              (Maybe.fromMaybe (Src.getImportName import_) (fmap A.toValue alias))
-                                              (A.toValue name) importerSrc
+                                    let newRefs =
+                                          case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports importerSrc) of
+                                            Just import_@(Src.Import _ alias exposing) ->
+                                              case findNameInExposing (A.toValue name) exposing of
+                                                Just importRegion ->
+                                                  importRegion :
+                                                    varInModule (A.toValue name) importerSrc ++
+                                                    varQualInModule
+                                                      (maybe (Src.getImportName import_) A.toValue alias)
+                                                      (A.toValue name)
+                                                      importerSrc
 
-                                      Nothing -> []
+                                                Nothing ->
+                                                  varQualInModule
+                                                    (maybe (Src.getImportName import_) A.toValue alias)
+                                                    (A.toValue name)
+                                                    importerSrc
 
-                              return $ Map.insert importerPath newRefs foundRefs
+                                            Nothing -> []
+
+                                    return $ Map.insert importerPath newRefs foundRefs
                         )
                         (return localRefs)
                         importers
