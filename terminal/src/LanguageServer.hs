@@ -443,7 +443,7 @@ run = do
                           sendProgressBegin workDoneToken "🔍 Finding references"
 
                           startTime <- Data.Time.getCurrentTime
-                          result <- Task.run $ findReferences state filePath position
+                          result <- findReferences state filePath position
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
 
@@ -494,17 +494,17 @@ run = do
                           loop state
 
                     Right (id, filePath, position) ->
-                      do  maybeTarget <- prepareRename state filePath position
+                      do  maybeTarget <- findDefinition state filePath position
                           case maybeTarget of
-                            Just (region, placeholder) ->
+                            Right (_, _, element, _) ->
                               do  respond id $
                                     Aeson.object
-                                      [ "range" .= encodeRange region
-                                      , "placeholder" .=  (placeholder :: String)
+                                      [ "range" .= encodeRange (A.toRegion element)
+                                      , "placeholder" .=  (elementToRenamePlaceholder element :: String)
                                       ]
                                   loop state
 
-                            Nothing ->
+                            Left _ ->
                               do  respond id Aeson.Null
                                   loop state
 
@@ -541,7 +541,7 @@ run = do
                           sendProgressBegin workDoneToken "✏️ Renaming"
 
                           startTime <- Data.Time.getCurrentTime
-                          result <- Task.run $ findReferences state filePath position
+                          result <- findReferences state filePath position
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
 
@@ -973,11 +973,11 @@ data DefinitionExit
   = DefinitionExitBadDetails Reporting.Exit.Details
   | DefinitionExitBadInput BS.ByteString Reporting.Error.Error
   | DefinitionExitNoRoot
-  | DefinitionExitNotFound Element
+  | DefinitionExitNotFound Element_
   | DefinitionExitNoElement
   | DefinitionExitModuleNotFound FilePath ModuleName.Raw
   | DefinitionExitNoFile FilePath
-  | DefinitionExitNoProperModName Element
+  | DefinitionExitNoProperModName Element_
   | DefinitionExitBadDownload Pkg.Name Version.Version Reporting.Exit.PackageProblem
 
 
@@ -1047,66 +1047,52 @@ data Found_
   | FoundModuleName Name
 
 
-findDefinition ::
-  State
+findDefinition :: State -> FilePath -> A.Position -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
+findDefinition state filePath position =
+  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+      case maybeRoot of
+        Just root -> findDefinitionHelp root state filePath position
+        Nothing   -> return $ Left DefinitionExitNoRoot
+
+
+findDefinitionHelp ::
+  FilePath
+  -> State
   -> FilePath
   -> A.Position
   -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
-findDefinition state filePath position =
+findDefinitionHelp root state filePath position =
   BW.withScope $ \scope ->
-  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+  Stuff.withRootLock root $ Task.run $
+  do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
 
-      case maybeRoot of
+      src <-
+        case Details._outline details of
+          Details.ValidApp _ -> loadSrcModuleByPath state filePath
+          Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
+
+      case findElement position src of
+        Just element ->
+          Task.eio id $
+            (findDefinitionForElement state details root filePath src (A.toValue element)
+               & fmap (\a -> a & fmap (\(a1, a2, a3) -> (a1, a2, element, a3)))
+            )
+
         Nothing ->
-          return (Left DefinitionExitNoRoot)
-
-        Just root ->
-          Stuff.withRootLock root $
-          do  details <- Details.load Reporting.silent scope root
-
-              case details of
-                Left exit -> return $ Left $ DefinitionExitBadDetails exit
-                Right details_ ->
-                  do  src <-
-                        case Details._outline details_ of
-                          Details.ValidApp _ -> loadSrcModuleByPath state filePath
-                          Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
-
-                      case src of
-                        Left exit_ -> return $ Left exit_
-                        Right src_ -> findDefinition_ state details_ root filePath src_ position
+          Task.throw DefinitionExitNoElement
 
 
-prepareRename :: State -> FilePath -> A.Position -> IO (Maybe ( A.Region, String ))
-prepareRename state filePath position =
-  do  result <- findDefinition state filePath position
-      case result of
-          Right (_, _, element, _) ->
-            pure $ Just (A.toRegion element, elementToRenamePlaceholder element)
-          _ ->
-            pure Nothing
-
-
-findDefinition_ ::
+findDefinitionForElement ::
   State
   -> Details.Details
   -> FilePath
   -> FilePath
   -> Src.Module
-  -> A.Position
-  -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
-findDefinition_ state details root path src position =
-    let
-        element :: Maybe Element
-        element =
-          findElementInExports position (Src._exports src) <|>
-          findElementInValues position (Src._values src) <|>
-          findElementInAliases position (Src._aliases src) <|>
-          findElementInUnions position (Src._unions src) <|>
-          findElementInImports position (Src._imports src)
-    in
+  -> Element_
+  -> IO (Either DefinitionExit (FilePath, Src.Module, Found))
+findDefinitionForElement state details root path src element =
     case element of
-      Just element_@(A.At _ (EVar defs patterns Src.LowVar name)) ->
+      EVar defs patterns Src.LowVar name ->
         -- FIXME: first found exposed low var is returned. Which may or may not be
         -- correct.
         --
@@ -1138,52 +1124,46 @@ findDefinition_ state details root path src position =
 
             return $
               case (local, external) of
-                (Just a, _) -> Right (path, src, element_, a)
-                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, element_, fmap FoundValue c)) a
+                (Just a, _) -> Right (path, src, a)
+                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, fmap FoundValue c)) a
                 (Nothing, Left a) -> Left a
-                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element_)
+                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element)
 
-      Just element_@(A.At _ (EVarQual _ _ Src.LowVar mod name)) ->
+      EVarQual _ _ Src.LowVar mod name ->
        fmap
          (\a -> a
-           >>= fmap (\(a, b, c) -> (a, b, element_, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound element_)) Right
+           >>= fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound element)) Right
          )
          (findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name)
 
-      Just element_@(A.At _ (EVar _ _ Src.CapVar name)) ->
+      EVar _ _ Src.CapVar name ->
         do  let local = findDefinitionForCapVarLocally src name
             external <- findDefinitionForCapVarInImports state details root (Src._imports src) name
 
             return $
               case (local, external) of
-                (Just a, _) -> Right (path, src, element_, a)
-                (Nothing, Right (Just a)) -> Right ((\(a1, a2, a3) -> (a1, a2, element_, a3)) a)
+                (Just a, _) -> Right (path, src, a)
+                (Nothing, Right (Just a)) -> Right a
                 (Nothing, Left a) -> Left a
-                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element_)
+                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element)
 
-      Just element_@(A.At _ (EVarQual _ _ Src.CapVar mod name)) ->
+      EVarQual _ _ Src.CapVar mod name ->
          findDefinitionForCapVarQualInImports state details root (Src._imports src) mod name
-         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound element_)) (\(a1, a2, a3) -> Right (a1, a2, element_, a3)))
+         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound element)) Right)
 
-      Just element_@(A.At _ (EInfix name_)) ->
+      EInfix name_ ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, element_, fmap FoundInfix c)) . maybe (Left (DefinitionExitNotFound element_)) Right
+            >>= fmap (\(a, b, c) -> (a, b, fmap FoundInfix c)) . maybe (Left (DefinitionExitNotFound element)) Right
           )
           (findDefinitionForInfixInImports state details root (Src._imports src) name_)
 
-      Just element_@(A.At _ (EModuleName name_)) ->
+      EModuleName name_ ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, element_, fmap FoundModuleName c)) . maybe (Left (DefinitionExitNotFound element_)) Right
+            >>= fmap (\(a, b, c) -> (a, b, fmap FoundModuleName c)) . maybe (Left (DefinitionExitNotFound element)) Right
           )
           (findDefinitionForModuleName state details root name_)
-
-      Just element_ ->
-        return $ Left $ DefinitionExitNotFound element_
-
-      Nothing ->
-        return $ Left DefinitionExitNoElement
 
 
 findDefinitionForModuleName ::
@@ -1508,14 +1488,6 @@ findDefinitionForNameInModule state details root moduleName name =
         Left exit ->
           return $ Left exit
 
-
-lookupPkgName :: Details.Details -> ModuleName.Raw -> Maybe Pkg.Name
-lookupPkgName details canModuleName =
-  fmap (\(Details.Foreign name_ _) -> name_) $
-    Map.lookup canModuleName $
-    Details._foreigns details
-
-
 findLowVarDefinitionNamed :: Name -> Src.Module -> Maybe (A.Located Src.Value)
 findLowVarDefinitionNamed name (Src.Module _ _ _ _ values _ _ _ _) =
   foldr (\value@(A.At _ (Src.Value name_ _ _ _)) acc ->
@@ -1564,9 +1536,9 @@ data Element_
   | EModuleName Name
 
 
-elementToStr :: Element -> String
+elementToStr :: Element_ -> String
 elementToStr element =
-  case A.toValue element of
+  case element of
     EVar _ _ _ name ->
       Name.toChars name ++ " (Var)"
     EVarQual _ _ _ prefix name ->
@@ -1577,6 +1549,7 @@ elementToStr element =
       Name.toChars name ++ " (Infix)"
     EModuleName name ->
       Name.toChars name ++ " (Module)"
+
 
 elementToRenamePlaceholder :: Element -> String
 elementToRenamePlaceholder element =
@@ -1591,6 +1564,15 @@ elementToRenamePlaceholder element =
       Name.toChars name
     EModuleName name ->
       Name.toChars name
+
+
+findElement :: A.Position -> Src.Module -> Maybe Element
+findElement pos src =
+  findElementInExports pos (Src._exports src) <|>
+  findElementInValues pos (Src._values src) <|>
+  findElementInAliases pos (Src._aliases src) <|>
+  findElementInUnions pos (Src._unions src) <|>
+  findElementInImports pos (Src._imports src)
 
 
 findElementInExports :: A.Position -> A.Located Src.Exposing -> Maybe Element
@@ -1991,109 +1973,129 @@ findElementInExpr position defs patterns expr@(A.At region _) =
 
 -- REFERENCES
 
-
-findReferences :: State -> FilePath -> A.Position -> Task.Task DefinitionExit (Map.Map FilePath [A.Region])
+findReferences :: State -> FilePath -> A.Position -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
 findReferences state filePath position =
-  Task.eio id $ BW.withScope $ \scope -> Task.run $
-  do  maybeRoot <- Task.io $ Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
       case maybeRoot of
+        Just root -> findReferencesHelp root state filePath position
+        Nothing   -> return $ Left DefinitionExitNoRoot
+
+
+findReferencesHelp :: FilePath -> State -> FilePath -> A.Position -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
+findReferencesHelp root state filePath position =
+  BW.withScope $ \scope ->
+  Stuff.withRootLock root $ Task.run $
+  do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
+
+      localSrc <-
+        case Details._outline details of
+          Details.ValidApp _ -> loadSrcModuleByPath state filePath
+          Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
+
+      definition <-
+        case findElement position localSrc of
+          Just element ->
+            Task.eio id $ findDefinitionForElement state details root filePath localSrc (A.toValue element)
+
+          Nothing ->
+            Task.throw DefinitionExitNoElement
+
+      case definition of
+        (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value (A.At _ name) _ _ _))) ->
+          let
+            local =
+              List.concatMap (findLowNameInValue name . A.toValue) (Src._values defSrc)
+              ++ valueRegions (A.At defRegion value)
+              ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
+                    & maybe [] (\a -> [a])
+                 )
+          in
+          Task.io $ foldr
+            (\a acc ->
+              do  loadResult <- loadSrcModule state details root a
+                  case loadResult of
+                      Left _ ->
+                        -- Ignore file not found - importersOf can return
+                        -- importers for deleted files since Details are loaded
+                        -- from elm-stuff
+                        acc
+
+                      Right (path, src) ->
+                        let
+                          imported =
+                            findReferencesForImportedLowVar (Src.getName defSrc) name src
+                        in
+                        fmap (Map.insert path imported) acc
+            )
+            (return $ Map.singleton modulePath local)
+            (importersOf details (Src.getName defSrc))
+
+        (modulePath, defSrc, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
+          let local = infixInModule name localSrc in
+          Task.io $ foldr
+            (\a acc ->
+              do  loadResult <- loadSrcModule state details root a
+                  case loadResult of
+                    Left _ ->
+                      -- Ignore file not found - importersOf can return
+                      -- importers for deleted files since Details are loaded
+                      -- from elm-stuff                      let newRefs =
+                      acc
+
+                    Right (path, src) ->
+                      let
+                        imported =
+                          case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports src) of
+                            Just import_@(Src.Import _ alias _) ->
+                              if isInfixExposed import_ name then
+                                infixInModule name src
+
+                              else
+                                []
+
+                            Nothing -> []
+                      in
+                      fmap (Map.insert path imported) acc
+            )
+            (return $ Map.singleton modulePath local)
+            (importersOf details (Src.getName defSrc))
+
+        _ ->
+          return Map.empty
+
+
+findReferencesForImportedLowVar :: ModuleName.Raw -> Name -> Src.Module -> [A.Region]
+findReferencesForImportedLowVar moduleName name src =
+  case List.find (\a -> A.toValue (Src._import a) == moduleName) (Src._imports src) of
+    Just import_@(Src.Import _ alias exposing) ->
+      let
+        qual = maybe (Src.getImportName import_) A.toValue alias
+
+        qualInValues =
+          Src._values src
+            & List.concatMap
+                (\(A.At _ (Src.Value _ _ expr _)) ->
+                  varQualInExpr qual name [] expr
+                )
+            & map (\a -> keepOnlyNameRegionInVarQualRegion a name)
+      in
+      case findNameInExposing name exposing of
+        Just importRegion ->
+          let inValues = concatMap (findLowNameInValue name . A.toValue) (Src._values src) in
+          importRegion : inValues ++ qualInValues
+
         Nothing ->
-          Task.throw DefinitionExitNoRoot
+          qualInValues
 
-        Just root ->
-          Task.eio id $ Stuff.withRootLock root $ Task.run $
+    Nothing -> []
 
-          do  details <-
-                Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
 
-              localSrc <-
-                case Details._outline details of
-                  Details.ValidApp _ -> Task.eio id $ loadSrcModuleByPath state filePath
-                  Details.ValidPkg name _ _ -> Task.eio id $ loadPkgModuleByPath state name filePath
-
-              definition <- Task.eio id $ findDefinition_ state details root filePath localSrc position
-
-              case definition of
-                (modulePath, defSrc, _, A.At defRegion (FoundValue value@(Src.Value name _ _ _))) ->
-                  do  let importers = importersOf details (Src.getName defSrc)
-
-                      let localRefs =
-                            Map.singleton modulePath
-                              (
-                                varInModule (A.toValue name) defSrc
-                                ++ valueRegions (A.At defRegion value)
-                                ++
-                                  (
-                                    findNameInExposing (A.toValue name) (A.toValue (Src._exports defSrc))
-                                      & maybe [] (\a -> [a])
-                                  )
-                              )
-
-                      foldr
-                        (\a acc ->
-                          do  loadResult <- Task.io $ loadSrcModule state details root a
-                              case loadResult of
-                                  Left _ ->
-                                    -- Ignore file not found - importersOf can return
-                                    -- importers for deleted files since Details are loaded
-                                    -- from elm-stuff
-                                    acc
-
-                                  Right (importerPath, importerSrc) -> do
-                                    foundRefs <- acc
-
-                                    let newRefs =
-                                          case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports importerSrc) of
-                                            Just import_@(Src.Import _ alias exposing) ->
-                                              case findNameInExposing (A.toValue name) exposing of
-                                                Just importRegion ->
-                                                  importRegion :
-                                                    varInModule (A.toValue name) importerSrc ++
-                                                    varQualInModule
-                                                      (maybe (Src.getImportName import_) A.toValue alias)
-                                                      (A.toValue name)
-                                                      importerSrc
-
-                                                Nothing ->
-                                                  varQualInModule
-                                                    (maybe (Src.getImportName import_) A.toValue alias)
-                                                    (A.toValue name)
-                                                    importerSrc
-
-                                            Nothing -> []
-
-                                    return $ Map.insert importerPath newRefs foundRefs
-                        )
-                        (return localRefs)
-                        importers
-
-                (modulePath, defSrc, _, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
-                  do  let importers = importersOf details (Src.getName defSrc)
-
-                      let localRefs = Map.singleton modulePath (infixInModule name localSrc)
-
-                      foldr
-                        (\a acc ->
-                          do  (importerPath, importerSrc) <- Task.eio id $ loadSrcModule state details root a
-
-                              foundRefs <- acc
-
-                              let newRefs =
-                                    case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports importerSrc) of
-                                      Just import_@(Src.Import _ alias _) ->
-                                        if isInfixExposed import_ name
-                                          then infixInModule name importerSrc
-                                          else []
-
-                                      Nothing -> []
-
-                              return $ Map.insert importerPath newRefs foundRefs
-                        )
-                        (return localRefs)
-                        importers
-
-                _ ->
-                  return Map.empty
+keepOnlyNameRegionInVarQualRegion :: A.Region -> Name -> A.Region
+keepOnlyNameRegionInVarQualRegion (A.Region _ (A.Position endRow endCol)) name =
+  let
+    nameLength = fromIntegral (length (Name.toChars name))
+  in
+  A.Region (A.Position endRow (endCol - nameLength)) (A.Position endRow endCol)
 
 
 loadSrcModule :: State -> Details.Details -> FilePath -> ModuleName.Raw -> IO (Either DefinitionExit (FilePath, Src.Module))
@@ -2181,25 +2183,37 @@ loadSrcModule state details root moduleName =
                   return $ Left $ DefinitionExitModuleNotFound root moduleName
 
 
+lookupPkgName :: Details.Details -> ModuleName.Raw -> Maybe Pkg.Name
+lookupPkgName details canModuleName =
+  fmap (\(Details.Foreign name_ _) -> name_) $
+    Map.lookup canModuleName $
+    Details._foreigns details
 
-loadSrcModuleByPath :: State -> FilePath -> IO (Either DefinitionExit Src.Module)
+
+loadSrcModuleByPath :: State -> FilePath -> Task.Task DefinitionExit Src.Module
 loadSrcModuleByPath state filePath =
-  do  files <- Control.Concurrent.MVar.readMVar (_changedFiles state)
-      source <- maybe (File.readUtf8 filePath) return $ Map.lookup filePath files
+  do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+      source <- maybe (Task.io $ File.readUtf8 filePath) return $ Map.lookup filePath files
 
-      return $
-        Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-          (Parse.fromByteString Parse.Application source)
+      case Parse.fromByteString Parse.Application source of
+        Left err ->
+          Task.throw (DefinitionExitBadInput source (Reporting.Error.BadSyntax err))
+
+        Right module_ ->
+          return module_
 
 
-loadPkgModuleByPath :: State -> Pkg.Name -> FilePath -> IO (Either DefinitionExit Src.Module)
+loadPkgModuleByPath :: State -> Pkg.Name -> FilePath -> Task.Task DefinitionExit Src.Module
 loadPkgModuleByPath state pkgName filePath =
-  do  files <- Control.Concurrent.MVar.readMVar (_changedFiles state)
-      source <- maybe (File.readUtf8 filePath) return $ (Map.lookup filePath files)
+  do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
+      source <- maybe (Task.io $ File.readUtf8 filePath) return $ Map.lookup filePath files
 
-      return $
-        Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax)
-          (Parse.fromByteString (Parse.Package pkgName) source)
+      case Parse.fromByteString (Parse.Package pkgName) source of
+        Left err ->
+          Task.throw (DefinitionExitBadInput source (Reporting.Error.BadSyntax err))
+
+        Right module_ ->
+          return module_
 
 
 isLowVarExposed :: Src.Import -> Name -> Bool
@@ -2241,15 +2255,13 @@ importersOf details targetModule =
     locals
 
 
-varInModule :: Name -> Src.Module -> [A.Region]
-varInModule name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
-    List.concatMap
-      (\(A.At _ val@(Src.Value _ patterns expr _)) ->
-        if any (Maybe.isJust . findDefinitionForNameInPattern name) patterns
-          then []
-          else varInExpr name [] expr
-      )
-      values
+findLowNameInValue :: Name -> Src.Value -> [A.Region]
+findLowNameInValue name (Src.Value _ patterns expr _) =
+  -- Find out what this is about; the commit that added it says
+  -- "find modules correctly from inside packages"
+  if any (Maybe.isJust . findDefinitionForNameInPattern name) patterns
+    then []
+    else varInExpr name [] expr
 
 
 valueRegions :: A.Located Src.Value -> [A.Region]
@@ -2280,7 +2292,7 @@ findNameInExposed :: Name -> Src.Exposed ->  Maybe A.Region
 findNameInExposed name exposed =
   case exposed of
     Src.Lower (A.At region name_) -> if name == name_ then Just region else Nothing
-    Src.Upper _ _ -> Nothing
+    Src.Upper (A.At region name_) _ -> if name == name_ then Just region else Nothing
     Src.Operator _ _ -> Nothing
 
 
@@ -2369,22 +2381,7 @@ varInExpr name foundRegions (A.At region expr_) =
         Src.Shader _ _ -> foundRegions
 
 
-varQualInModule :: Name -> Name -> Src.Module -> [A.Region]
-varQualInModule qual name srcMod@(Src.Module _ _ _ _ values _ _ _ _) =
-    List.concatMap
-      (\(A.At _ (Src.Value _ _ expr _)) ->
-        varQualInExpr qual name [] expr
-      )
-      values
-      & map (\a -> keepOnlyNameRegionInVarQualRegion a name)
 
-
-keepOnlyNameRegionInVarQualRegion :: A.Region -> Name -> A.Region
-keepOnlyNameRegionInVarQualRegion (A.Region _ (A.Position endRow endCol)) name =
-  let
-    nameLength = fromIntegral (length (Name.toChars name))
-  in
-  A.Region (A.Position endRow (endCol - nameLength)) (A.Position endRow endCol)
 
 
 varQualInExpr :: Name -> Name -> [A.Region] -> Src.Expr -> [A.Region]
