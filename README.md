@@ -9,7 +9,7 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 ## Features ✨
 
 - 🧭 Go to definition
-- 🔍 Find references (supports top level values, infix operators, aliases)
+- 🔍 Find references (supports top level values, infix operators, aliases, custom types (but not variants))
 - 🛡️ Diagnostics (errors and warnings)
 - 🏷️ Document symbols
 - 🧹 Formatting with `elm-format` (enabled when executable is available on init)

@@ -2079,6 +2079,55 @@ findReferencesHelp root state filePath position =
             (return $ Map.singleton modulePath local)
             (importersOf details (Src.getName defSrc))
 
+        (modulePath, defSrc, A.At defRegion (FoundUnion value@(Src.Union (A.At region name) _ _))) ->
+          let
+            local =
+              region : findNameInModuleTypes name defSrc
+              ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
+                   & maybe [] (\a -> [a])
+                 )
+          in
+          Task.io $ foldr
+            (\a acc ->
+              do  loadResult <- loadSrcModule state details root a
+                  case loadResult of
+                    Left _ ->
+                      -- Ignore file not found - importersOf can return
+                      -- importers for deleted files since Details are loaded
+                      -- from elm-stuff
+                      acc
+
+                    Right (path, src) ->
+                      let
+                        maybeImport =
+                          List.find
+                            (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
+                            (Src._imports src)
+
+                        imported =
+                          case maybeImport of
+                            Just import_@(Src.Import _ alias exposing) ->
+                              let
+                                qual = maybe (Src.getImportName import_) A.toValue alias
+
+                                qualInModule =
+                                  findQualNameInModuleTypes qual name src
+                                    & map (keepOnlyNameRegionInVarQualRegion name)
+                              in
+                              case findNameInExposing name exposing of
+                                Just importRegion ->
+                                  importRegion : findNameInModuleTypes name src ++ qualInModule
+
+                                Nothing ->
+                                  qualInModule
+
+                            Nothing -> []
+                      in
+                      fmap (Map.insert path imported) acc
+            )
+            (return $ Map.singleton modulePath local)
+            (importersOf details (Src.getName defSrc))
+
         (modulePath, defSrc, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
           let local = infixInModule name localSrc in
           Task.io $ foldr
@@ -2476,7 +2525,7 @@ varQualInExpr qual name foundRegions (A.At region expr_) =
         Src.Case expr branches ->
             List.foldl
                 (\foundRegions (pattern, branchExpr) ->
-                    varQualInExpr qual name (varQualInExpr qual name foundRegions branchExpr) expr
+                    varQualInExpr qual name foundRegions branchExpr
                 )
                 (varQualInExpr qual name foundRegions expr)
                 branches
@@ -2698,7 +2747,7 @@ findTypeInExprHelp f found (A.At region expr_) =
         Src.Negate expr -> findTypeInExprHelp f found expr
         Src.Binops exprsAndNames expr ->
           List.foldl
-            (\foundRegions (expr_, _) -> findTypeInExprHelp f foundRegions expr_)
+            (\acc (expr_, _) -> findTypeInExprHelp f acc expr_)
             (findTypeInExprHelp f found expr)
             exprsAndNames
         Src.Lambda patterns expr -> findTypeInExprHelp f found expr
@@ -2709,8 +2758,8 @@ findTypeInExprHelp f found (A.At region expr_) =
             exprs
         Src.If listTupleExprs expr ->
           List.foldl
-            (\foundRegions (one, two) ->
-              findTypeInExprHelp f (findTypeInExprHelp f foundRegions one) two
+            (\acc (one, two) ->
+              findTypeInExprHelp f (findTypeInExprHelp f acc one) two
             )
             (findTypeInExprHelp f found expr)
             listTupleExprs
@@ -2719,36 +2768,30 @@ findTypeInExprHelp f found (A.At region expr_) =
             (\acc a ->
               case A.toValue a of
                 Src.Define _ _ expr1 (Just (A.At _ tipe)) ->
-                  f tipe ++ findTypeInExprHelp f found expr1
+                  f tipe ++ findTypeInExprHelp f acc expr1
 
                 Src.Define _ _ expr1 _ ->
-                  findTypeInExprHelp f found expr1
+                  findTypeInExprHelp f acc expr1
 
                 Src.Destruct _ expr1 ->
-                  findTypeInExprHelp f found expr1
+                  findTypeInExprHelp f acc expr1
             )
             (findTypeInExprHelp f found expr)
             defs
 
         Src.Case expr branches ->
           List.foldl
-            (\foundRegions (pattern, branchExpr) ->
-              findTypeInExprHelp f (findTypeInExprHelp f foundRegions branchExpr) expr
+            (\acc (pattern, branchExpr) ->
+              findTypeInExprHelp f acc branchExpr
             )
             (findTypeInExprHelp f found expr)
             branches
         Src.Accessor _ -> found
         Src.Access expr _ -> findTypeInExprHelp f found expr
         Src.Update _ fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> findTypeInExprHelp f foundRegions fieldExpr)
-                found
-                fields
+            List.foldl (\acc (_, a) -> findTypeInExprHelp f acc a) found fields
         Src.Record fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> findTypeInExprHelp f foundRegions fieldExpr)
-                found
-                fields
+            List.foldl (\acc (_, a) -> findTypeInExprHelp f acc a) found fields
         Src.Unit -> found
         Src.Tuple exprA exprB exprs ->
             foldl (findTypeInExprHelp f) found (exprA : exprB : exprs)
