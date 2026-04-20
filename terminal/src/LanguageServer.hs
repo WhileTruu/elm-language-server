@@ -1434,11 +1434,10 @@ findDefinitionForInfixInImports state details root imports name =
   foldr
     (\import_ acc ->
       do  x <- findDefinitionForInfixInModule state details root (Src.getImportName import_) name
-          y <- acc
 
-          case (y, x) of
-            (Left _, x) -> return x
-            (Right acc, _) -> return $ Right acc
+          case x of
+            Right (Just _) -> return x
+            _ -> acc
     )
     (return (Right Nothing))
     potentialSources
