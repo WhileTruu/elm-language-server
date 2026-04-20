@@ -1973,6 +1973,7 @@ findElementInExpr position defs patterns expr@(A.At region _) =
 
 -- REFERENCES
 
+
 findReferences :: State -> FilePath -> A.Position -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
 findReferences state filePath position =
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
@@ -2004,7 +2005,7 @@ findReferencesHelp root state filePath position =
         (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value (A.At _ name) _ _ _))) ->
           let
             local =
-              List.concatMap (findLowNameInValue name . A.toValue) (Src._values defSrc)
+              List.concatMap (findVarInValue name . A.toValue) (Src._values defSrc)
               ++ valueRegions (A.At defRegion value)
               ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
                     & maybe [] (\a -> [a])
@@ -2014,18 +2015,67 @@ findReferencesHelp root state filePath position =
             (\a acc ->
               do  loadResult <- loadSrcModule state details root a
                   case loadResult of
-                      Left _ ->
-                        -- Ignore file not found - importersOf can return
-                        -- importers for deleted files since Details are loaded
-                        -- from elm-stuff
-                        acc
+                    Left _ ->
+                      -- Ignore file not found - importersOf can return
+                      -- importers for deleted files since Details are loaded
+                      -- from elm-stuff
+                      acc
 
-                      Right (path, src) ->
-                        let
-                          imported =
-                            findReferencesForImportedLowVar (Src.getName defSrc) name src
-                        in
-                        fmap (Map.insert path imported) acc
+                    Right (path, src) ->
+                      let
+                        imported =
+                          findReferencesForImportedLowVar (Src.getName defSrc) name src
+                      in
+                      fmap (Map.insert path imported) acc
+            )
+            (return $ Map.singleton modulePath local)
+            (importersOf details (Src.getName defSrc))
+
+        (modulePath, defSrc, A.At defRegion (FoundAlias value@(Src.Alias (A.At region name) _ _))) ->
+          let
+            local =
+              region : findNameInModuleTypes name defSrc
+              ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
+                   & maybe [] (\a -> [a])
+                 )
+          in
+          Task.io $ foldr
+            (\a acc ->
+              do  loadResult <- loadSrcModule state details root a
+                  case loadResult of
+                    Left _ ->
+                      -- Ignore file not found - importersOf can return
+                      -- importers for deleted files since Details are loaded
+                      -- from elm-stuff
+                      acc
+
+                    Right (path, src) ->
+                      let
+                        maybeImport =
+                          List.find
+                            (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
+                            (Src._imports src)
+
+                        imported =
+                          case maybeImport of
+                            Just import_@(Src.Import _ alias exposing) ->
+                              let
+                                qual = maybe (Src.getImportName import_) A.toValue alias
+
+                                qualInModule =
+                                  findQualNameInModuleTypes qual name src
+                                    & map (keepOnlyNameRegionInVarQualRegion name)
+                              in
+                              case findNameInExposing name exposing of
+                                Just importRegion ->
+                                  importRegion : findNameInModuleTypes name src ++ qualInModule
+
+                                Nothing ->
+                                  qualInModule
+
+                            Nothing -> []
+                      in
+                      fmap (Map.insert path imported) acc
             )
             (return $ Map.singleton modulePath local)
             (importersOf details (Src.getName defSrc))
@@ -2077,11 +2127,11 @@ findReferencesForImportedLowVar moduleName name src =
                 (\(A.At _ (Src.Value _ _ expr _)) ->
                   varQualInExpr qual name [] expr
                 )
-            & map (\a -> keepOnlyNameRegionInVarQualRegion a name)
+            & map (keepOnlyNameRegionInVarQualRegion name)
       in
       case findNameInExposing name exposing of
         Just importRegion ->
-          let inValues = concatMap (findLowNameInValue name . A.toValue) (Src._values src) in
+          let inValues = concatMap (findVarInValue name . A.toValue) (Src._values src) in
           importRegion : inValues ++ qualInValues
 
         Nothing ->
@@ -2090,8 +2140,8 @@ findReferencesForImportedLowVar moduleName name src =
     Nothing -> []
 
 
-keepOnlyNameRegionInVarQualRegion :: A.Region -> Name -> A.Region
-keepOnlyNameRegionInVarQualRegion (A.Region _ (A.Position endRow endCol)) name =
+keepOnlyNameRegionInVarQualRegion :: Name -> A.Region -> A.Region
+keepOnlyNameRegionInVarQualRegion name (A.Region _ (A.Position endRow endCol)) =
   let
     nameLength = fromIntegral (length (Name.toChars name))
   in
@@ -2255,8 +2305,8 @@ importersOf details targetModule =
     locals
 
 
-findLowNameInValue :: Name -> Src.Value -> [A.Region]
-findLowNameInValue name (Src.Value _ patterns expr _) =
+findVarInValue :: Name -> Src.Value -> [A.Region]
+findVarInValue name (Src.Value _ patterns expr _) =
   -- Find out what this is about; the commit that added it says
   -- "find modules correctly from inside packages"
   if any (Maybe.isJust . findDefinitionForNameInPattern name) patterns
@@ -2379,9 +2429,6 @@ varInExpr name foundRegions (A.At region expr_) =
                 foundRegions
                 (exprA : exprB : exprs)
         Src.Shader _ _ -> foundRegions
-
-
-
 
 
 varQualInExpr :: Name -> Name -> [A.Region] -> Src.Expr -> [A.Region]
@@ -2529,6 +2576,184 @@ infixInExpr name foundRegions (A.At region expr_) =
                 foundRegions
                 (exprA : exprB : exprs)
         Src.Shader _ _ -> foundRegions
+
+
+findQualNameInModuleTypes :: ModuleName.Raw -> Name -> Src.Module -> [A.Region]
+findQualNameInModuleTypes qual name src =
+  concatMap
+    (\(A.At _  (Src.Value _ _ expr maybeTipe)) ->
+      maybe [] (findQualNameInType qual name . A.toValue) maybeTipe
+      ++
+      findTypeInExpr (findQualNameInType qual name) expr
+    )
+    (Src._values src)
+  ++
+  concatMap
+   (\(A.At _ (Src.Union _ _ variants)) ->
+     concatMap (concatMap (findQualNameInType qual name . A.toValue) . snd) variants
+   )
+   (Src._unions src)
+  ++
+  concatMap
+   (\(A.At _ (Src.Alias _ _ tipe)) -> findQualNameInType qual name (A.toValue tipe))
+   (Src._aliases src)
+
+
+findQualNameInType :: ModuleName.Raw -> Name -> Src.Type_ -> [A.Region]
+findQualNameInType qual name tipe =
+  case tipe of
+    Src.TLambda arg ret ->
+      findQualNameInType qual name (A.toValue arg) ++ findQualNameInType qual name (A.toValue ret)
+
+    Src.TVar name ->
+      []
+
+    Src.TType region _ tlist ->
+      concatMap (findQualNameInType qual name . A.toValue) tlist
+
+    Src.TTypeQual region qual_ name_ tlist ->
+      if qual_ == qual && name == name_ then
+        region : concatMap (findQualNameInType qual name . A.toValue) tlist
+      else
+        concatMap (findQualNameInType qual name . A.toValue) tlist
+
+    Src.TRecord fields extRecord ->
+      concatMap (\a -> findQualNameInType qual name (A.toValue (snd a))) fields
+
+    Src.TUnit ->
+      []
+
+    Src.TTuple a b rest ->
+      findQualNameInType qual name (A.toValue a)
+      ++ findQualNameInType qual name (A.toValue b)
+      ++ concatMap (findQualNameInType qual name . A.toValue) rest
+
+
+findNameInModuleTypes :: Name -> Src.Module -> [A.Region]
+findNameInModuleTypes name src =
+  concatMap
+    (\(A.At _  (Src.Value _ _ expr maybeTipe)) ->
+      maybe [] (findNameInType name . A.toValue) maybeTipe
+      ++
+      findTypeInExpr (findNameInType name) expr
+    )
+    (Src._values src)
+  ++
+  concatMap
+   (\(A.At _ (Src.Union _ _ variants)) ->
+     concatMap (concatMap (findNameInType name . A.toValue) . snd) variants
+   )
+   (Src._unions src)
+  ++
+  concatMap
+   (\(A.At _ (Src.Alias _ _ tipe)) -> findNameInType name (A.toValue tipe))
+   (Src._aliases src)
+
+
+findNameInType :: Name -> Src.Type_ -> [A.Region]
+findNameInType name tipe =
+  case tipe of
+    Src.TLambda arg ret ->
+      findNameInType name (A.toValue arg) ++ findNameInType name (A.toValue ret)
+
+    Src.TVar name ->
+      []
+
+    Src.TType region name_ tlist ->
+      if name == name_ then
+        region : concatMap (findNameInType name . A.toValue) tlist
+      else
+        concatMap (findNameInType name . A.toValue) tlist
+
+    Src.TTypeQual _ _ _ tlist ->
+      concatMap (findNameInType name . A.toValue) tlist
+
+    Src.TRecord fields extRecord ->
+      concatMap (\a -> findNameInType name (A.toValue (snd a))) fields
+
+    Src.TUnit ->
+      []
+
+    Src.TTuple a b rest ->
+      findNameInType name (A.toValue a)
+      ++ findNameInType name (A.toValue b)
+      ++ concatMap (findNameInType name . A.toValue) rest
+
+
+findTypeInExpr :: (Src.Type_ -> [A.Region]) -> Src.Expr -> [A.Region]
+findTypeInExpr f expr =
+  findTypeInExprHelp f [] expr
+
+
+findTypeInExprHelp :: (Src.Type_ -> [A.Region]) -> [A.Region] -> Src.Expr -> [A.Region]
+findTypeInExprHelp f found (A.At region expr_) =
+    case expr_ of
+        Src.Chr _ -> found
+        Src.Str _ -> found
+        Src.Int _ -> found
+        Src.Float _ -> found
+        Src.Var _ varName -> found
+        Src.VarQual _ _ _ -> found
+        Src.List exprs -> List.foldl (findTypeInExprHelp f) found exprs
+        Src.Op _ -> found
+        Src.Negate expr -> findTypeInExprHelp f found expr
+        Src.Binops exprsAndNames expr ->
+          List.foldl
+            (\foundRegions (expr_, _) -> findTypeInExprHelp f foundRegions expr_)
+            (findTypeInExprHelp f found expr)
+            exprsAndNames
+        Src.Lambda patterns expr -> findTypeInExprHelp f found expr
+        Src.Call expr exprs ->
+          List.foldl
+            (findTypeInExprHelp f)
+            (findTypeInExprHelp f found expr)
+            exprs
+        Src.If listTupleExprs expr ->
+          List.foldl
+            (\foundRegions (one, two) ->
+              findTypeInExprHelp f (findTypeInExprHelp f foundRegions one) two
+            )
+            (findTypeInExprHelp f found expr)
+            listTupleExprs
+        Src.Let defs expr ->
+          foldl
+            (\acc a ->
+              case A.toValue a of
+                Src.Define _ _ expr1 (Just (A.At _ tipe)) ->
+                  f tipe ++ findTypeInExprHelp f found expr1
+
+                Src.Define _ _ expr1 _ ->
+                  findTypeInExprHelp f found expr1
+
+                Src.Destruct _ expr1 ->
+                  findTypeInExprHelp f found expr1
+            )
+            (findTypeInExprHelp f found expr)
+            defs
+
+        Src.Case expr branches ->
+          List.foldl
+            (\foundRegions (pattern, branchExpr) ->
+              findTypeInExprHelp f (findTypeInExprHelp f foundRegions branchExpr) expr
+            )
+            (findTypeInExprHelp f found expr)
+            branches
+        Src.Accessor _ -> found
+        Src.Access expr _ -> findTypeInExprHelp f found expr
+        Src.Update _ fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) -> findTypeInExprHelp f foundRegions fieldExpr)
+                found
+                fields
+        Src.Record fields ->
+            List.foldl
+                (\foundRegions (_, fieldExpr) -> findTypeInExprHelp f foundRegions fieldExpr)
+                found
+                fields
+        Src.Unit -> found
+        Src.Tuple exprA exprB exprs ->
+            foldl (findTypeInExprHelp f) found (exprA : exprB : exprs)
+        Src.Shader _ _ -> found
 
 
 
