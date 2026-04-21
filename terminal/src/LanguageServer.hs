@@ -122,6 +122,7 @@ run = do
     loop state =
       do  contentLength <- readHeader
           body <- BSLC.hGet IO.stdin (contentLength + 2)
+          startTime <- Data.Time.getCurrentTime
 
           case Aeson.parseEither (\obj -> obj .: "method") =<< Aeson.eitherDecode body of
             Left err ->
@@ -134,7 +135,6 @@ run = do
                         Aeson.parseEither (\obj ->
                           do  params <- obj .: "params"
                               id <- obj .: "id"
-                              -- FIXME: type annotation needed because value is not used probably
                               rootPath <- params .: "rootPath" :: Aeson.Parser String
                               initializationOptions <- params Aeson..:? "initializationOptions" :: Aeson.Parser (Maybe Aeson.Object)
 
@@ -173,9 +173,6 @@ run = do
                                          , "save" .= True
                                          ]
                                     , "referencesProvider" .= True
-                                    -- , "hoverProvider" .= Aeson.object
-                                    --   [ "workDoneProgress" .= True
-                                    --   ]
                                     ]
                                   , "serverInfo" .= Aeson.object
                                     [ "name" .= ("whiletruu-elm-language-server" :: String)
@@ -391,7 +388,6 @@ run = do
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "👀 Finding definition"
 
-                          startTime <- Data.Time.getCurrentTime
                           result <- findDefinition state filePath position
                           endTime <- Data.Time.getCurrentTime
 
@@ -435,22 +431,19 @@ run = do
                           loop state
 
                     Right (id, filePath, position) ->
-                      do   -- FIXME: find references appears to fail when a file is deleted
-                          -- a reference to the file still exists in elm-stuff and it'll
-                          -- continue to fail until elm-stuff is cleared
-                          let workDoneToken = "goto-references"
+                      do  let workDoneToken = "goto-references"
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "🔍 Finding references"
 
-                          startTime <- Data.Time.getCurrentTime
                           result <- findReferences state filePath position
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
 
                           case result of
                             Right references ->
-                              do  sendProgressEnd workDoneToken $
-                                    "Found " ++ show (length references) ++ " in " ++ show timeDiff
+                              do  let amount = length (concat (Map.elems references))
+                                  sendProgressEnd workDoneToken $
+                                    "Found " ++ show amount ++ " in " ++ show timeDiff
 
                                   respond id
                                     $ Aeson.toJSON
@@ -540,15 +533,15 @@ run = do
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "✏️ Renaming"
 
-                          startTime <- Data.Time.getCurrentTime
                           result <- findReferences state filePath position
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
 
                           case result of
                             Right references ->
-                              do  sendProgressEnd workDoneToken $
-                                    "Found " ++ show (length references) ++ " in " ++ show timeDiff
+                              do  let amount = length (concat (Map.elems references))
+                                  sendProgressEnd workDoneToken $
+                                    "Found " ++ show amount ++ " in " ++ show timeDiff
 
                                   respond id $ Aeson.toJSON $
                                      encodeWorkspaceEdit references (Name.fromChars newName)
@@ -654,7 +647,6 @@ run = do
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "Finding symbols"
 
-                          startTime <- Data.Time.getCurrentTime
                           result <- singleFileForSymbols state filePath
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
