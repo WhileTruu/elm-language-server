@@ -11,6 +11,7 @@ module Build
   , ReplArtifacts(..)
   , DocsGoal(..)
   , getRootNames
+  , loadInterface
   )
   where
 
