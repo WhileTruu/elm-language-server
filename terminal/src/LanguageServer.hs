@@ -176,7 +176,7 @@ run = do
                                     ]
                                   , "serverInfo" .= Aeson.object
                                     [ "name" .= ("whiletruu-elm-language-server" :: String)
-                                    , "version" .= ("0.0.1" :: String)
+                                    , "version" .= ("1.0.0" :: String)
                                     ]
                                   ]
 

@@ -8,7 +8,7 @@
 }:
 mkDerivation {
   pname = "elm-language-server";
-  version = "0.3";
+  version = "1.0.0";
   src = ../../..;
   isLibrary = false;
   isExecutable = true;

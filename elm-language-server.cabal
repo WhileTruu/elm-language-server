@@ -1,6 +1,6 @@
 
 Name: elm-language-server
-Version: 0.3
+Version: 1.0.0
 
 Synopsis:
     Fork of the Elm compiler, repurposed for a language server.
