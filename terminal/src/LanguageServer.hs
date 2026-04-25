@@ -228,7 +228,8 @@ run = do
                       do  Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
                             return $ Map.insert filePath (BS_UTF8.fromString text) a
 
-                          result <- diagnostics filePath []
+                          style <- Reporting.languageServer
+                          result <- diagnostics style filePath []
 
                           case result of
                             Left err ->
@@ -274,7 +275,8 @@ run = do
                     Right filePath ->
                       do  let mVar = _changedFiles state
 
-                          result <- diagnostics filePath []
+                          style <- Reporting.languageServer
+                          result <- diagnostics style filePath []
 
                           case result of
                             Left err ->
@@ -388,7 +390,8 @@ run = do
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "👀 Finding definition"
 
-                          result <- findDefinition state filePath position
+                          style <- Reporting.languageServer
+                          result <- findDefinition style state filePath position
                           endTime <- Data.Time.getCurrentTime
 
                           sendProgressEnd workDoneToken $
@@ -435,7 +438,8 @@ run = do
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "🔍 Finding references"
 
-                          result <- findReferences state filePath position
+                          style <- Reporting.languageServer
+                          result <- findReferences style state filePath position
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
 
@@ -487,7 +491,8 @@ run = do
                           loop state
 
                     Right (id, filePath, position) ->
-                      do  maybeTarget <- findDefinition state filePath position
+                      do  style <- Reporting.languageServer
+                          maybeTarget <- findDefinition style state filePath position
                           case maybeTarget of
                             Right (_, _, element, _) ->
                               do  respond id $
@@ -533,7 +538,8 @@ run = do
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "✏️ Renaming"
 
-                          result <- findReferences state filePath position
+                          style <- Reporting.languageServer
+                          result <- findReferences style state filePath position
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
 
@@ -647,7 +653,8 @@ run = do
                           sendCreateWorkDoneProgress workDoneToken
                           sendProgressBegin workDoneToken "Finding symbols"
 
-                          result <- singleFileForSymbols state filePath
+                          style <- Reporting.languageServer
+                          result <- singleFileForSymbols style state filePath
                           endTime <- Data.Time.getCurrentTime
                           let timeDiff = Data.Time.diffUTCTime endTime startTime
 
@@ -1039,24 +1046,30 @@ data Found_
   | FoundModuleName Name
 
 
-findDefinition :: State -> FilePath -> A.Position -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
-findDefinition state filePath position =
-  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
-      case maybeRoot of
-        Just root -> findDefinitionHelp root state filePath position
-        Nothing   -> return $ Left DefinitionExitNoRoot
-
-
-findDefinitionHelp ::
-  FilePath
+findDefinition ::
+  Reporting.Style
   -> State
   -> FilePath
   -> A.Position
   -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
-findDefinitionHelp root state filePath position =
+findDefinition style state filePath position =
+  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+      case maybeRoot of
+        Just root -> findDefinitionHelp style root state filePath position
+        Nothing   -> return $ Left DefinitionExitNoRoot
+
+
+findDefinitionHelp ::
+  Reporting.Style
+  -> FilePath
+  -> State
+  -> FilePath
+  -> A.Position
+  -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
+findDefinitionHelp style root state filePath position =
   BW.withScope $ \scope ->
   Stuff.withRootLock root $ Task.run $
-  do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
+  do  details <- Task.eio DefinitionExitBadDetails $ Details.load style scope root
 
       src <-
         case Details._outline details of
@@ -1965,19 +1978,30 @@ findElementInExpr position defs patterns expr@(A.At region _) =
 -- REFERENCES
 
 
-findReferences :: State -> FilePath -> A.Position -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
-findReferences state filePath position =
+findReferences ::
+  Reporting.Style
+  -> State
+  -> FilePath
+  -> A.Position
+  -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
+findReferences style state filePath position =
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
       case maybeRoot of
-        Just root -> findReferencesHelp root state filePath position
+        Just root -> findReferencesHelp style root state filePath position
         Nothing   -> return $ Left DefinitionExitNoRoot
 
 
-findReferencesHelp :: FilePath -> State -> FilePath -> A.Position -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
-findReferencesHelp root state filePath position =
+findReferencesHelp ::
+  Reporting.Style
+  -> FilePath
+  -> State
+  -> FilePath
+  -> A.Position
+  -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
+findReferencesHelp style root state filePath position =
   BW.withScope $ \scope ->
   Stuff.withRootLock root $ Task.run $
-  do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
+  do  details <- Task.eio DefinitionExitBadDetails $ Details.load style scope root
 
       localSrc <-
         case Details._outline details of
@@ -2857,8 +2881,8 @@ diagnosticsExitToReport exit =
       Reporting.Exit.toBuildProblemReport problem
 
 
-diagnostics :: FilePath -> [FilePath] -> IO (Either DiagnosticsExit [(FilePath, Int, [Reporting.Report.Report])])
-diagnostics filePath remain =
+diagnostics :: Reporting.Style -> FilePath -> [FilePath] -> IO (Either DiagnosticsExit [(FilePath, Int, [Reporting.Report.Report])])
+diagnostics style filePath remain =
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
 
       case maybeRoot of
@@ -2874,10 +2898,10 @@ diagnostics filePath remain =
                   BW.withScope $ \scope -> Stuff.withRootLock root $
                     Task.run $
                       do  details <- Task.eio DiagnosticsExitBadDetails $
-                                       Details.load Reporting.silent scope root
+                                       Details.load style scope root
 
                           artifacts <- Task.eio DiagnosticsExitBadBuild $
-                                         Build.fromPaths Reporting.silent
+                                         Build.fromPaths style
                                            root
                                            details
                                            (Data.NonEmptyList.List filePath files)
@@ -2895,7 +2919,7 @@ diagnostics filePath remain =
                               Details.ValidApp _ -> Parse.Application
                               Details.ValidPkg name _ _ -> (Parse.Package name)
 
-                      warnings <-  warnings projectType root path
+                      warnings <-  warnings style projectType root path
 
                       case warnings of
                         Nothing ->
@@ -3069,9 +3093,9 @@ data Artifacts =
 
 -- WARNINGS
 
-warnings :: Parse.ProjectType -> FilePath -> FilePath -> IO (Maybe (Src.Module, [ Reporting.Warning.Warning ]))
-warnings projectType root path =
-  do  loaded <- loadSingle projectType root path
+warnings :: Reporting.Style -> Parse.ProjectType -> FilePath -> FilePath -> IO (Maybe (Src.Module, [ Reporting.Warning.Warning ]))
+warnings style projectType root path =
+  do  loaded <- loadSingle style projectType root path
 
       let (Single source maybeWarnings interfaces canonical compiled) =
             addAliasOptionsToWarnings $
@@ -3089,14 +3113,14 @@ The below function also modifies the canonical AST by hydrating missing types.
 
 -}
 -- @TODO this is a disk mode function
-loadSingle :: Parse.ProjectType -> FilePath -> FilePath -> IO SingleFileResult
-loadSingle projectType root path =
+loadSingle :: Reporting.Style -> Parse.ProjectType -> FilePath -> FilePath -> IO SingleFileResult
+loadSingle style projectType root path =
   Dir.withCurrentDirectory root $
     do  source <- File.readUtf8 path
         case Parse.fromByteString projectType source of
           Right srcModule ->
-            do  ifacesResult <- allInterfaces root (Data.NonEmptyList.List path [])
-                (Artifacts packageIfaces globalGraph) <- allPackageArtifacts root
+            do  ifacesResult <- allInterfaces style root (Data.NonEmptyList.List path [])
+                (Artifacts packageIfaces globalGraph) <- allPackageArtifacts style root
                 pure $ case ifacesResult of
                   Left exit ->
                     -- report exit : Exit.Reactor?
@@ -3197,15 +3221,19 @@ loadSingle projectType root path =
               )
 
 
-allInterfaces :: FilePath -> Data.NonEmptyList.List FilePath -> IO (Either Reporting.Exit.Reactor (Map.Map ModuleName.Raw Interface.Interface))
-allInterfaces root paths =
+allInterfaces ::
+  Reporting.Style
+  -> FilePath
+  -> Data.NonEmptyList.List FilePath
+  -> IO (Either Reporting.Exit.Reactor (Map.Map ModuleName.Raw Interface.Interface))
+allInterfaces style root paths =
   Dir.withCurrentDirectory root $
     BW.withScope $ \scope -> Stuff.withRootLock root $
       Task.run $
         do  details <- Task.eio Reporting.Exit.ReactorBadDetails $
-              Details.load Reporting.silent scope root
+              Details.load style scope root
             artifacts <- Task.eio Reporting.Exit.ReactorBadBuild $
-              Build.fromPaths Reporting.silent root details paths
+              Build.fromPaths style root details paths
 
             Task.io $ extractInterfaces root $ Build._modules artifacts
 
@@ -3254,11 +3282,11 @@ cachedHelp root name ciMvar = do
 {- Appropriated from worker/src/Artifacts.hs
    WARNING: does not load any user code!!!
 -}
-allPackageArtifacts :: FilePath ->  IO Artifacts
-allPackageArtifacts root =
+allPackageArtifacts :: Reporting.Style -> FilePath ->  IO Artifacts
+allPackageArtifacts style root =
   BW.withScope $ \scope ->
   do  --debug "Loading allDeps"
-      let style = Reporting.silent
+      let style = style
       result <- Details.load style scope root
       case result of
         Left _ ->
@@ -4153,8 +4181,8 @@ usedInAnnotation (Can.Forall freevars type_) found =
 -- SYMBOLS
 
 
-singleFileForSymbols :: State -> FilePath -> IO (Either DefinitionExit SingleFileResult)
-singleFileForSymbols state filePath =
+singleFileForSymbols :: Reporting.Style -> State -> FilePath -> IO (Either DefinitionExit SingleFileResult)
+singleFileForSymbols style state filePath =
   BW.withScope $ \scope ->
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
 
@@ -4163,9 +4191,8 @@ singleFileForSymbols state filePath =
           return (Left DefinitionExitNoRoot)
 
         Just root ->
-          -- TODO: figure out why root lock stuff is anywhere anyway :D
           do  details <- Stuff.withRootLock root $
-                Details.load Reporting.silent scope root
+                Details.load style scope root
 
               case details of
                 Left exit -> return $ Left $ DefinitionExitBadDetails exit
@@ -4175,7 +4202,7 @@ singleFileForSymbols state filePath =
                               Details.ValidApp _ -> Parse.Application
                               Details.ValidPkg pkgName _ _ -> Parse.Package pkgName
 
-                      fmap Right $ loadSingle projectType root filePath
+                      fmap Right $ loadSingle style projectType root filePath
 
 
 srcModuleSymbols :: Src.Module -> [Aeson.Value]

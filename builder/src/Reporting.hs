@@ -4,6 +4,7 @@ module Reporting
   , silent
   , json
   , terminal
+  , languageServer
   --
   , attempt
   , attemptWithStyle
@@ -44,6 +45,10 @@ import qualified Reporting.Doc as D
 import qualified Reporting.Exit as Exit
 import qualified Reporting.Exit.Help as Help
 
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy.Char8 as BSLC
+import Data.Aeson ((.:), (.=))
 
 
 -- STYLE
@@ -53,6 +58,7 @@ data Style
   = Silent
   | Json
   | Terminal (MVar ())
+  | LanguageServer (MVar ())
 
 
 silent :: Style
@@ -69,6 +75,10 @@ terminal :: IO Style
 terminal =
   Terminal <$> newMVar ()
 
+
+languageServer :: IO Style
+languageServer =
+  LanguageServer <$> newMVar ()
 
 
 -- ATTEMPT
@@ -195,6 +205,20 @@ trackDetails style callback =
           writeChan chan Nothing
           return answer
 
+    LanguageServer mvar ->
+      do  chan <- newChan
+
+          _ <- forkIO $
+            do  takeMVar mvar
+                sendCreateWorkDoneProgress "details"
+                sendProgressBegin "details" "Verifying dependencies..."
+                languageServerDetailsLoop chan (DState 0 0 0 0 0 0 0)
+                putMVar mvar ()
+
+          answer <- callback (Key (writeChan chan . Just))
+          writeChan chan Nothing
+          return answer
+
 
 detailsLoop :: Chan (Maybe DMsg) -> DState -> IO ()
 detailsLoop chan state@(DState total _ _ _ _ built _) =
@@ -297,6 +321,71 @@ clear before after =
   '\r' : replicate (length before) ' ' ++ '\r' : after
 
 
+languageServerDetailsLoop :: Chan (Maybe DMsg) -> DState -> IO ()
+languageServerDetailsLoop chan state@(DState total _ _ _ _ built _) =
+  do  msg <- readChan chan
+      case msg of
+        Just dmsg ->
+          languageServerDetailsLoop chan =<< languageServerDetailsStep dmsg state
+
+        Nothing ->
+          if built == total
+            then sendProgressEnd "details" "Dependencies ready!"
+            else sendProgressEnd "details" "Dependency problem!"
+
+
+languageServerDetailsStep :: DMsg -> DState -> IO DState
+languageServerDetailsStep msg (DState total cached rqst rcvd failed built broken) =
+  case msg of
+    DStart numDependencies ->
+      return (DState numDependencies 0 0 0 0 0 0)
+
+    DCached ->
+      languageServerPutTransition (DState total (cached + 1) rqst rcvd failed built broken)
+
+    DRequested ->
+      do  when (rqst == 0) (sendProgressReport "details" "Starting downloads...")
+          return (DState total cached (rqst + 1) rcvd failed built broken)
+
+    DReceived pkg vsn ->
+      do  languageServerPutDownload "●" pkg vsn
+          languageServerPutTransition (DState total cached rqst (rcvd + 1) failed built broken)
+
+    DFailed pkg vsn ->
+      do  languageServerPutDownload "X" pkg vsn
+          languageServerPutTransition (DState total cached rqst rcvd (failed + 1) built broken)
+
+    DBuilt ->
+      languageServerPutBuilt (DState total cached rqst rcvd failed (built + 1) broken)
+
+    DBroken ->
+      languageServerPutBuilt (DState total cached rqst rcvd failed built (broken + 1))
+
+
+languageServerPutTransition :: DState -> IO DState
+languageServerPutTransition state@(DState total cached _ rcvd failed built broken) =
+  if cached + rcvd + failed < total then
+    return state
+
+  else
+    do  sendProgressReport "details" $ toBuildProgress (built + broken + failed) total
+        return state
+
+
+languageServerPutBuilt :: DState -> IO DState
+languageServerPutBuilt state@(DState total cached _ rcvd failed built broken) =
+  do  when (total == cached + rcvd + failed) $
+        sendProgressReport "details" $  toBuildProgress (built + broken + failed) total
+      return state
+
+
+languageServerPutDownload :: String -> Pkg.Name -> V.Version -> IO ()
+languageServerPutDownload mark pkg vsn =
+  sendProgressReport "details" $
+    mark
+    ++ " " ++ Pkg.toChars pkg
+    ++ V.toChars vsn
+
 
 -- BUILD
 
@@ -322,6 +411,21 @@ trackBuild style callback =
             do  takeMVar mvar
                 putStrFlush "Compiling ..."
                 buildLoop chan 0
+                putMVar mvar ()
+
+          result <- callback (Key (writeChan chan . Left))
+          writeChan chan (Right result)
+          return result
+
+    LanguageServer mvar ->
+      do  chan <- newChan
+
+          _ <- forkIO $
+            do  takeMVar mvar
+
+                sendCreateWorkDoneProgress "build"
+                sendProgressBegin "build" "Compiling"
+                languageServerBuildLoop chan 0
                 putMVar mvar ()
 
           result <- callback (Key (writeChan chan . Left))
@@ -373,6 +477,21 @@ toFinalMessage done result =
         Exit.BuildProjectProblem _ ->
           "Detected a problem."
 
+
+languageServerBuildLoop :: Chan (Either BMsg (BResult a)) -> Int -> IO ()
+languageServerBuildLoop chan done =
+  do  msg <- readChan chan
+      case msg of
+        Left BDone ->
+          do  let !done1 = done + 1
+              sendProgressReport "build" $ show done1
+              languageServerBuildLoop chan done1
+
+        Right result ->
+          let
+            !message = toFinalMessage done result
+          in
+          sendProgressEnd "build" message
 
 
 -- GENERATE
@@ -472,3 +591,65 @@ putException e = do
         \ hard to change, so even when we have a couple good examples, it can take some\
         \ time to resolve in a solid way."
     ]
+
+
+sendCreateWorkDoneProgress :: String -> IO ()
+sendCreateWorkDoneProgress token = do
+  sendNotification "window/workDoneProgress/create"
+    (Aeson.object
+      [ "token" Aeson..= token
+      ]
+    )
+
+
+sendProgressBegin :: String -> String -> IO ()
+sendProgressBegin token title = do
+  sendNotification "$/progress"
+    (Aeson.object
+      [ "token" Aeson..= token
+      , "value" Aeson..= Aeson.object
+        [ "kind" Aeson..= ("begin" :: String)
+        , "title" Aeson..= title
+        ]
+      ]
+    )
+
+
+sendProgressReport :: String -> String -> IO ()
+sendProgressReport token message = do
+  sendNotification "$/progress"
+    (Aeson.object
+      [ "token" Aeson..= token
+      , "value" Aeson..= Aeson.object
+        [ "kind" Aeson..= ("report" :: String)
+        , "message" Aeson..= message
+        ]
+      ]
+    )
+
+
+sendProgressEnd :: String -> String -> IO ()
+sendProgressEnd token message = do
+  sendNotification "$/progress"
+    (Aeson.object
+      [ "token" Aeson..= token
+      , "value" Aeson..= Aeson.object
+        [ "kind" Aeson..= ("end" :: String)
+        , "message" Aeson..= message
+        ]
+      ]
+    )
+
+
+sendNotification :: String -> Aeson.Value -> IO ()
+sendNotification method value =
+  let
+    header = "Content-Length: " ++ show (BSC.length content) ++ "\r\n\r\n"
+    content = BSLC.toStrict $ Aeson.encode $ Aeson.object
+      [ "method" .= method
+      , "params" .= value
+      ]
+   in do
+   BSC.hPutStr stdout (BSC.pack header `BSC.append` content)
+   hFlush stdout
+
