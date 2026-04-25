@@ -34,7 +34,6 @@ import qualified Data.Set as Set
 import qualified Data.NonEmptyList
 import qualified Data.ByteString.UTF8 as BS_UTF8
 import Data.Function ((&))
-import Data.Word (Word16, Word32)
 import qualified System.IO as IO
 import qualified System.Directory as Dir
 import qualified System.Exit as Exit
@@ -3445,16 +3444,9 @@ inferTypeAtPositionHelp root state filePath position =
           Right regionTypes ->
             let localizer = Reporting.Render.Type.Localizer.fromModule src
             in
-            case lookupPositionType position regionTypes of
+            case Infer.lookupHoverInfo position src regionTypes of
               Just (region, tipe) -> return (region, localizer, tipe)
               Nothing -> Task.throw DefinitionExitNoElement
-
-
-lookupPositionType :: A.Position -> Map.Map A.Region InferType.HoverInfo -> Maybe (A.Region, InferType.HoverInfo)
-lookupPositionType position regionTypes =
-  case filter (\(region, _) -> isInRegion position region) (Map.toList regionTypes) of
-    [] -> Nothing
-    matches -> Just (List.minimumBy compareRegionSpan matches)
 
 
 renderHoverContents :: String -> InferType.HoverInfo -> String
@@ -3504,32 +3496,11 @@ hoverKindToLabel hoverKind =
     InferType.HoverOperator ->
       "Operator"
 
+    InferType.HoverRecordField ->
+      "Record field"
+
     InferType.HoverFieldAccessor ->
       "Field accessor"
-
-
-regionWithin :: A.Region -> A.Region -> Bool
-regionWithin (A.Region start end) (A.Region outerStart outerEnd) =
-  positionLeq outerStart start && positionLeq end outerEnd
-
-
-positionLeq :: A.Position -> A.Position -> Bool
-positionLeq (A.Position row1 col1) (A.Position row2 col2) =
-  row1 < row2 || (row1 == row2 && col1 <= col2)
-
-
-compareRegionSpan :: (A.Region, a) -> (A.Region, b) -> Ordering
-compareRegionSpan (region1, _) (region2, _) =
-  compare (regionSpan region1) (regionSpan region2)
-
-
-regionSpan :: A.Region -> (Word32, Word16, Word32, Word16)
-regionSpan (A.Region (A.Position startRow startCol) (A.Position endRow endCol)) =
-  ( endRow - startRow
-  , endCol - startCol
-  , startRow
-  , startCol
-  )
 
 
 loadInterfaces ::

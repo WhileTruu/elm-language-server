@@ -54,6 +54,7 @@ data HoverKind
   | HoverConstructor
   | HoverCustomTypeVariant
   | HoverOperator
+  | HoverRecordField
   | HoverFieldAccessor
 
 
