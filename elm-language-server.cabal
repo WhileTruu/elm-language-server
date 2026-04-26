@@ -57,6 +57,7 @@ Executable elm-language-server
         Publish
         Repl
         LanguageServer
+        LanguageServer.Reporting
 
         -- terminal args
         Terminal

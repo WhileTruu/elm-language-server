@@ -100,6 +100,8 @@ import Data.Function ((&))
 
 import qualified Http
 
+import LanguageServer.Reporting as LsReporting
+
 
 data State = State
   { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
@@ -434,22 +436,12 @@ run = do
                           loop state
 
                     Right (id, filePath, position) ->
-                      do  let workDoneToken = "goto-references"
-                          sendCreateWorkDoneProgress workDoneToken
-                          sendProgressBegin workDoneToken "🔍 Finding references"
-
-                          style <- Reporting.languageServer
+                      do  style <- Reporting.languageServer
                           result <- findReferences style state filePath position
-                          endTime <- Data.Time.getCurrentTime
-                          let timeDiff = Data.Time.diffUTCTime endTime startTime
 
                           case result of
                             Right references ->
-                              do  let amount = length (concat (Map.elems references))
-                                  sendProgressEnd workDoneToken $
-                                    "Found " ++ show amount ++ " in " ++ show timeDiff
-
-                                  respond id
+                              do  respond id
                                     $ Aeson.toJSON
                                     $ concatMap (\(fp, regions) ->
                                         map (encodeRegion fp) regions
@@ -457,10 +449,7 @@ run = do
                                   loop state
 
                             Left err ->
-                              do  sendProgressEnd workDoneToken $
-                                    "Failed to find references in " ++ show timeDiff
-
-                                  respondErr id $ Reporting.Exit.toString $
+                              do  respondErr id $ Reporting.Exit.toString $
                                     definitionExitToReport filePath err
                                   loop state
 
@@ -1047,25 +1036,26 @@ findDefinition ::
   -> A.Position
   -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
 findDefinition style state filePath position =
-  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
-      case maybeRoot of
-        Just root -> findDefinitionHelp style root state filePath position
-        Nothing   -> return $ Left DefinitionExitNoRoot
+  Task.run $
+    do  root <- Task.mio DefinitionExitNoRoot $
+           Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+        details <- Task.eio DefinitionExitBadDetails $
+          BW.withScope $ \scope ->
+            Stuff.withRootLock root (Details.load style scope root)
+
+        findDefinitionHelp style details root state filePath position
 
 
 findDefinitionHelp ::
   Reporting.Style
+  -> Details.Details
   -> FilePath
   -> State
   -> FilePath
   -> A.Position
-  -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
-findDefinitionHelp style root state filePath position =
-  BW.withScope $ \scope ->
-  Stuff.withRootLock root $ Task.run $
-  do  details <- Task.eio DefinitionExitBadDetails $ Details.load style scope root
-
-      src <-
+  -> Task.Task DefinitionExit (FilePath, Src.Module, Element, Found)
+findDefinitionHelp style details root state filePath position =
+  do  src <-
         case Details._outline details of
           Details.ValidApp _ -> loadSrcModuleByPath state filePath
           Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
@@ -1979,194 +1969,197 @@ findReferences ::
   -> A.Position
   -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
 findReferences style state filePath position =
-  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
-      case maybeRoot of
-        Just root -> findReferencesHelp style root state filePath position
-        Nothing   -> return $ Left DefinitionExitNoRoot
+  Task.run $
+    do  root <- Task.mio DefinitionExitNoRoot $
+           Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+        details <- Task.eio DefinitionExitBadDetails $
+          BW.withScope $ \scope ->
+            Stuff.withRootLock root (Details.load style scope root)
+
+        localSrc <-
+          case Details._outline details of
+            Details.ValidApp _ -> loadSrcModuleByPath state filePath
+            Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
+
+        definition <-
+          case findElement position localSrc of
+            Just element ->
+              Task.eio id $ findDefinitionForElement state details root filePath localSrc (A.toValue element)
+
+            Nothing ->
+              Task.throw DefinitionExitNoElement
+
+        Task.io $ findReferencesHelp details root state localSrc definition
 
 
 findReferencesHelp ::
-  Reporting.Style
+  Details.Details
   -> FilePath
   -> State
-  -> FilePath
-  -> A.Position
-  -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
-findReferencesHelp style root state filePath position =
-  BW.withScope $ \scope ->
-  Stuff.withRootLock root $ Task.run $
-  do  details <- Task.eio DefinitionExitBadDetails $ Details.load style scope root
-
-      localSrc <-
-        case Details._outline details of
-          Details.ValidApp _ -> loadSrcModuleByPath state filePath
-          Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
-
-      definition <-
-        case findElement position localSrc of
-          Just element ->
-            Task.eio id $ findDefinitionForElement state details root filePath localSrc (A.toValue element)
-
-          Nothing ->
-            Task.throw DefinitionExitNoElement
-
-      case definition of
+  -> Src.Module
+  -> (FilePath, Src.Module, Found)
+  -> IO (Map.Map FilePath [A.Region])
+findReferencesHelp details root state localSrc definition =
+  LsReporting.trackReferences $ \key ->
+  do  case definition of
         (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value (A.At _ name) _ _ _))) ->
-          let
-            local =
-              List.concatMap (findVarInValue name . A.toValue) (Src._values defSrc)
-              ++ valueRegions (A.At defRegion value)
-              ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
-                    & maybe [] (\a -> [a])
-                 )
-          in
-          Task.io $ foldr
-            (\a acc ->
-              do  loadResult <- loadSrcModule state details root a
-                  case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+          do  let local =
+                    List.concatMap (findVarInValue name . A.toValue) (Src._values defSrc)
+                    ++ valueRegions (A.At defRegion value)
+                    ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
+                          & maybe [] (\a -> [a])
+                       )
+              LsReporting.report key (RefsDone (length local))
+              foldr
+                (\a acc ->
+                  do  loadResult <- loadSrcModule state details root a
 
-                    Right (path, src) ->
-                      let
-                        imported =
-                          findReferencesForImportedLowVar (Src.getName defSrc) name src
-                      in
-                      fmap (Map.insert path imported) acc
-            )
-            (return $ Map.singleton modulePath local)
-            (importersOf details (Src.getName defSrc))
+                      case loadResult of
+                        Left _ ->
+                          -- Ignore file not found - importersOf can return
+                          -- importers for deleted files since Details are loaded
+                          -- from elm-stuff
+                          acc
+
+                        Right (path, src) ->
+                          do  let imported =
+                                    findReferencesForImportedLowVar (Src.getName defSrc) name src
+
+                              LsReporting.report key (RefsDone (length imported))
+                              fmap (Map.insert path imported) acc
+                )
+                (return $ Map.singleton modulePath local)
+                (importersOf details (Src.getName defSrc))
 
         (modulePath, defSrc, A.At defRegion (FoundAlias value@(Src.Alias (A.At region name) _ _))) ->
-          let
-            local =
-              region : findNameInModuleTypes name defSrc
-              ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
-                   & maybe [] (\a -> [a])
-                 )
-          in
-          Task.io $ foldr
-            (\a acc ->
-              do  loadResult <- loadSrcModule state details root a
-                  case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+          do  let local =
+                    region : findNameInModuleTypes name defSrc
+                    ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
+                         & maybe [] (\a -> [a])
+                       )
+              LsReporting.report key (RefsDone (length local))
+              foldr
+                (\a acc ->
+                  do  loadResult <- loadSrcModule state details root a
+                      case loadResult of
+                        Left _ ->
+                          -- Ignore file not found - importersOf can return
+                          -- importers for deleted files since Details are loaded
+                          -- from elm-stuff
+                          acc
 
-                    Right (path, src) ->
-                      let
-                        maybeImport =
-                          List.find
-                            (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
-                            (Src._imports src)
+                        Right (path, src) ->
+                          let
+                            maybeImport =
+                              List.find
+                                (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
+                                (Src._imports src)
 
-                        imported =
-                          case maybeImport of
-                            Just import_@(Src.Import _ alias exposing) ->
-                              let
-                                qual = maybe (Src.getImportName import_) A.toValue alias
+                            imported =
+                              case maybeImport of
+                                Just import_@(Src.Import _ alias exposing) ->
+                                  let
+                                    qual = maybe (Src.getImportName import_) A.toValue alias
 
-                                qualInModule =
-                                  findQualNameInModuleTypes qual name src
-                                    & map (keepOnlyNameRegionInVarQualRegion name)
-                              in
-                              case findNameInExposing name exposing of
-                                Just importRegion ->
-                                  importRegion : findNameInModuleTypes name src ++ qualInModule
+                                    qualInModule =
+                                      findQualNameInModuleTypes qual name src
+                                        & map (keepOnlyNameRegionInVarQualRegion name)
+                                  in
+                                  case findNameInExposing name exposing of
+                                    Just importRegion ->
+                                      importRegion : findNameInModuleTypes name src ++ qualInModule
 
-                                Nothing ->
-                                  qualInModule
+                                    Nothing ->
+                                      qualInModule
 
-                            Nothing -> []
-                      in
-                      fmap (Map.insert path imported) acc
-            )
-            (return $ Map.singleton modulePath local)
-            (importersOf details (Src.getName defSrc))
+                                Nothing -> []
+                          in
+                          do  LsReporting.report key (RefsDone (length imported))
+                              fmap (Map.insert path imported) acc
+                )
+                (return $ Map.singleton modulePath local)
+                (importersOf details (Src.getName defSrc))
 
         (modulePath, defSrc, A.At defRegion (FoundUnion value@(Src.Union (A.At region name) _ _))) ->
-          let
-            local =
-              region : findNameInModuleTypes name defSrc
-              ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
-                   & maybe [] (\a -> [a])
-                 )
-          in
-          Task.io $ foldr
-            (\a acc ->
-              do  loadResult <- loadSrcModule state details root a
-                  case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+          do  let local =
+                    region : findNameInModuleTypes name defSrc
+                    ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
+                         & maybe [] (\a -> [a])
+                       )
+              LsReporting.report key (RefsDone (length local))
+              foldr
+                (\a acc ->
+                  do  loadResult <- loadSrcModule state details root a
+                      case loadResult of
+                        Left _ ->
+                          -- Ignore file not found - importersOf can return
+                          -- importers for deleted files since Details are loaded
+                          -- from elm-stuff
+                          acc
 
-                    Right (path, src) ->
-                      let
-                        maybeImport =
-                          List.find
-                            (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
-                            (Src._imports src)
+                        Right (path, src) ->
+                          let
+                            maybeImport =
+                              List.find
+                                (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
+                                (Src._imports src)
 
-                        imported =
-                          case maybeImport of
-                            Just import_@(Src.Import _ alias exposing) ->
-                              let
-                                qual = maybe (Src.getImportName import_) A.toValue alias
+                            imported =
+                              case maybeImport of
+                                Just import_@(Src.Import _ alias exposing) ->
+                                  let
+                                    qual = maybe (Src.getImportName import_) A.toValue alias
 
-                                qualInModule =
-                                  findQualNameInModuleTypes qual name src
-                                    & map (keepOnlyNameRegionInVarQualRegion name)
-                              in
-                              case findNameInExposing name exposing of
-                                Just importRegion ->
-                                  importRegion : findNameInModuleTypes name src ++ qualInModule
+                                    qualInModule =
+                                      findQualNameInModuleTypes qual name src
+                                        & map (keepOnlyNameRegionInVarQualRegion name)
+                                  in
+                                  case findNameInExposing name exposing of
+                                    Just importRegion ->
+                                      importRegion : findNameInModuleTypes name src ++ qualInModule
 
-                                Nothing ->
-                                  qualInModule
+                                    Nothing ->
+                                      qualInModule
 
-                            Nothing -> []
-                      in
-                      fmap (Map.insert path imported) acc
-            )
-            (return $ Map.singleton modulePath local)
-            (importersOf details (Src.getName defSrc))
+                                Nothing -> []
+                          in
+                          do  LsReporting.report key (RefsDone (length imported))
+                              fmap (Map.insert path imported) acc
+                )
+                (return $ Map.singleton modulePath local)
+                (importersOf details (Src.getName defSrc))
 
         (modulePath, defSrc, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
-          let local = infixInModule name localSrc in
-          Task.io $ foldr
-            (\a acc ->
-              do  loadResult <- loadSrcModule state details root a
-                  case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff                      let newRefs =
-                      acc
+          do  let local = infixInModule name localSrc
+              LsReporting.report key (RefsDone (length local))
+              foldr
+                (\a acc ->
+                  do  loadResult <- loadSrcModule state details root a
+                      case loadResult of
+                        Left _ ->
+                          -- Ignore file not found - importersOf can return
+                          -- importers for deleted files since Details are loaded
+                          -- from elm-stuff
+                          acc
 
-                    Right (path, src) ->
-                      let
-                        imported =
-                          case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports src) of
-                            Just import_@(Src.Import _ alias _) ->
-                              if isInfixExposed import_ name then
-                                infixInModule name src
+                        Right (path, src) ->
+                          let
+                            imported =
+                              case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports src) of
+                                Just import_@(Src.Import _ alias _) ->
+                                  if isInfixExposed import_ name then
+                                    infixInModule name src
 
-                              else
-                                []
+                                  else
+                                    []
 
-                            Nothing -> []
-                      in
-                      fmap (Map.insert path imported) acc
-            )
-            (return $ Map.singleton modulePath local)
-            (importersOf details (Src.getName defSrc))
+                                Nothing -> []
+                          in
+                          do  LsReporting.report key (RefsDone (length imported))
+                              fmap (Map.insert path imported) acc
+                )
+                (return $ Map.singleton modulePath local)
+                (importersOf details (Src.getName defSrc))
 
         _ ->
           return Map.empty
