@@ -10,7 +10,7 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 
 - __Go to definition__
 - __Find references__ (supports top level values, infix operators, aliases, custom types (but not variants))
-- __Diagnostics__ (errors and warnings)
+- __Diagnostics__ (compiler errors)
 - __Document symbols__
 - __Formatting__ with `elm-format` (enabled when executable is available on init)
 - __Rename__ (based on references, supports the same stuff)
