@@ -6,14 +6,14 @@ An `elm-compiler` based language server implementation for the Elm programming l
 
 A language server should be *fast* and *reliable*. The Elm compiler is both of those things, a language server built from it might be as well.
 
-## Features ✨
+## Features
 
-- 🧭 Go to definition
-- 🔍 Find references (supports top level values, infix operators, aliases, custom types (but not variants))
-- 🛡️ Diagnostics (errors and warnings)
-- 🏷️ Document symbols
-- 🧹 Formatting with `elm-format` (enabled when executable is available on init)
-- ✏️ Rename (based on references, supports the same stuff)
+- __Go to definition__
+- __Find references__ (supports top level values, infix operators, aliases, custom types (but not variants))
+- __Diagnostics__ (errors and warnings)
+- __Document symbols__
+- __Formatting__ with `elm-format` (enabled when executable is available on init)
+- __Rename__ (based on references, supports the same stuff)
 
 ## Configuration
 - `initializationOptions.whiletruu-elm-language-server.elmFormatPath` formatter executable, defaults to `elm-format`
