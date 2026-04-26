@@ -8,11 +8,6 @@
 
 ```
 
-- **Elm:** ???
-- **Browser:** ???
-- **Operating System:** ???
-
-
 ## Additional Details
 
 ???

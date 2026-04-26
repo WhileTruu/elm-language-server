@@ -1,12 +1,20 @@
 # WhileTruu's Elm language server
 
-An `elm-compiler` based language server implementation for the Elm programming language.
+A language server implementation for the Elm programming language.
 
 # Why?
 
-A language server should be *fast* and *reliable*. The Elm compiler is both of those things, a language server built from it might be as well.
+This language server was created with the goal of having something as *fast* and
+*reliable* as the Elm compiler to use in editors on a specific large codebase
+(~300klc + another ~300kloc of generated code), where existing solutions did not cut it.
+
+I also wanted a really chatty server, so that if it's doing anything important,
+like compiling, finding references or a definition, I know that it's doing that
+and that it hasn't fallen asleep or gotten stuck in an infinite loop instead.
 
 ## Features
+
+- __Work done progress__ - on as many things as possible
 
 - __Go to definition__
 ![definition](images/language-server-definition.gif?raw=true)
