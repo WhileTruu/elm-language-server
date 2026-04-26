@@ -93,3 +93,5 @@ These projects were of a lot of help:
 * [elm-tooling/elm-language-server](https://github.com/elm-tooling/elm-language-server)
 * [mdgriffith/elm-dev](https://github.com/mdgriffith/elm-dev)
 
+There's also this cool language server project with a very similar goal:
+* [lue-bird/elm-language-server-rs](https://github.com/lue-bird/elm-language-server-rs)
