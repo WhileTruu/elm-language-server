@@ -388,16 +388,9 @@ run = do
                           loop state
 
                     Right (id, filePath, position) ->
-                      do  let workDoneToken = "goto-definition"
-                          sendCreateWorkDoneProgress workDoneToken
-                          sendProgressBegin workDoneToken "👀 Finding definition"
-
-                          style <- Reporting.languageServer
+                      do  style <- Reporting.languageServer
                           result <- findDefinition style state filePath position
                           endTime <- Data.Time.getCurrentTime
-
-                          sendProgressEnd workDoneToken $
-                             "Done in " ++ show (Data.Time.diffUTCTime endTime startTime)
 
                           case result of
                             Right (definitionFilePath, _, _, A.At region _) ->
@@ -1043,18 +1036,20 @@ findDefinition style state filePath position =
           BW.withScope $ \scope ->
             Stuff.withRootLock root (Details.load style scope root)
 
-        findDefinitionHelp style details root state filePath position
+        findDefinitionHelp details root state filePath position
 
 
 findDefinitionHelp ::
-  Reporting.Style
-  -> Details.Details
+  Details.Details
   -> FilePath
   -> State
   -> FilePath
   -> A.Position
   -> Task.Task DefinitionExit (FilePath, Src.Module, Element, Found)
-findDefinitionHelp style details root state filePath position =
+findDefinitionHelp details root state filePath position =
+  Task.eio id $
+  LsReporting.trackDefinition $
+  Task.run $
   do  src <-
         case Details._outline details of
           Details.ValidApp _ -> loadSrcModuleByPath state filePath
@@ -1062,7 +1057,7 @@ findDefinitionHelp style details root state filePath position =
 
       case findElement position src of
         Just element ->
-          Task.eio id $
+          Task.eio id
             (findDefinitionForElement state details root filePath src (A.toValue element)
                & fmap (\a -> a & fmap (\(a1, a2, a3) -> (a1, a2, element, a3)))
             )
@@ -1981,13 +1976,7 @@ findReferences style state filePath position =
             Details.ValidApp _ -> loadSrcModuleByPath state filePath
             Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
 
-        definition <-
-          case findElement position localSrc of
-            Just element ->
-              Task.eio id $ findDefinitionForElement state details root filePath localSrc (A.toValue element)
-
-            Nothing ->
-              Task.throw DefinitionExitNoElement
+        definition <- findDefinitionHelp details root state filePath position
 
         Task.io $ findReferencesHelp details root state localSrc definition
 
@@ -1997,12 +1986,12 @@ findReferencesHelp ::
   -> FilePath
   -> State
   -> Src.Module
-  -> (FilePath, Src.Module, Found)
+  -> (FilePath, Src.Module, Element, Found)
   -> IO (Map.Map FilePath [A.Region])
 findReferencesHelp details root state localSrc definition =
   LsReporting.trackReferences $ \key ->
   do  case definition of
-        (modulePath, defSrc, A.At defRegion (FoundValue value@(Src.Value (A.At _ name) _ _ _))) ->
+        (modulePath, defSrc, _, A.At defRegion (FoundValue value@(Src.Value (A.At _ name) _ _ _))) ->
           do  let local =
                     List.concatMap (findVarInValue name . A.toValue) (Src._values defSrc)
                     ++ valueRegions (A.At defRegion value)
@@ -2031,7 +2020,7 @@ findReferencesHelp details root state localSrc definition =
                 (return $ Map.singleton modulePath local)
                 (importersOf details (Src.getName defSrc))
 
-        (modulePath, defSrc, A.At defRegion (FoundAlias value@(Src.Alias (A.At region name) _ _))) ->
+        (modulePath, defSrc, _, A.At defRegion (FoundAlias value@(Src.Alias (A.At region name) _ _))) ->
           do  let local =
                     region : findNameInModuleTypes name defSrc
                     ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
@@ -2080,7 +2069,7 @@ findReferencesHelp details root state localSrc definition =
                 (return $ Map.singleton modulePath local)
                 (importersOf details (Src.getName defSrc))
 
-        (modulePath, defSrc, A.At defRegion (FoundUnion value@(Src.Union (A.At region name) _ _))) ->
+        (modulePath, defSrc, _, A.At defRegion (FoundUnion value@(Src.Union (A.At region name) _ _))) ->
           do  let local =
                     region : findNameInModuleTypes name defSrc
                     ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
@@ -2129,7 +2118,7 @@ findReferencesHelp details root state localSrc definition =
                 (return $ Map.singleton modulePath local)
                 (importersOf details (Src.getName defSrc))
 
-        (modulePath, defSrc, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
+        (modulePath, defSrc, _, A.At defRegion (FoundInfix infix_@(Src.Infix name _ _ _))) ->
           do  let local = infixInModule name localSrc
               LsReporting.report key (RefsDone (length local))
               foldr
