@@ -9,6 +9,7 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 ## Features
 
 - __Go to definition__
+![definition](images/language-server-definition.gif?raw=true)
 - __Find references__ (supports top level values, infix operators, aliases, custom types (but not variants))
 ![references](images/language-server-references.gif?raw=true)
 - __Diagnostics__ (compiler errors)
@@ -16,7 +17,9 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 - __Document symbols__
 ![symbols](images/language-server-symbols.gif?raw=true)
 - __Formatting__ with `elm-format` (enabled when executable is available on init)
+![format](images/language-server-format.gif?raw=true)
 - __Rename__ (based on references, supports the same stuff)
+![rename](images/language-server-rename.gif?raw=true)
 
 ## Configuration
 - `initializationOptions.whiletruu-elm-language-server.elmFormatPath` formatter executable, defaults to `elm-format`
