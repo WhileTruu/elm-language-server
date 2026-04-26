@@ -7,6 +7,7 @@ module LanguageServer.Reporting
   , RefsKey
   , RefsMsg(..)
   , trackReferences
+  , trackDefinition
   )
   where
 
@@ -56,7 +57,7 @@ ignorer =
 
 
 
--- DIAGNOSTICS
+-- REFERENCES
 
 
 type RefsKey = Key RefsMsg
@@ -99,6 +100,26 @@ referencesLoop timeStart chan done =
 
 data RefsMsg
   = RefsDone Int
+
+
+
+-- DEFINITION
+
+
+trackDefinition :: IO a -> IO a
+trackDefinition callback =
+  do  timeStart <- Data.Time.getCurrentTime
+
+      sendCreateWorkDoneProgress "definition"
+      sendProgressBegin "definition" "👀 Looking for definition"
+
+      answer <- callback
+
+      timeEnd <- Data.Time.getCurrentTime
+      let timeDiff = Data.Time.diffUTCTime timeEnd timeStart
+      sendProgressEnd "definition" $ "Found (" ++ show timeDiff ++ ")"
+
+      return answer
 
 
 
