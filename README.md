@@ -1,6 +1,6 @@
-# 🚧 WhileTruu's Elm language server 🚧
+# WhileTruu's Elm language server
 
-An **experimental** language server implementation for the Elm programming language.
+An `elm-compiler` based language server implementation for the Elm programming language.
 
 # Why?
 
