@@ -103,539 +103,504 @@ import qualified Http
 import LanguageServer.Reporting as LsReporting
 
 
-data State = State
-  { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
-  , _prevPublishedDiagnosticsFiles :: Control.Concurrent.MVar.MVar [FilePath]
-  , _elmFormat :: Control.Concurrent.MVar.MVar (Maybe FilePath)
-  }
+data State =
+  State
+    { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
+    , _prevPublishedDiagnosticsFiles :: Control.Concurrent.MVar.MVar [FilePath]
+    , _elmFormat :: Control.Concurrent.MVar.MVar (Maybe FilePath)
+    }
 
 
 run :: IO ()
-run = do
-  state <-
-    State
-      <$> Control.Concurrent.MVar.newMVar Map.empty
-      <*> Control.Concurrent.MVar.newMVar []
-      <*> Control.Concurrent.MVar.newMVar Nothing
+run =
+  do  changedFiles <- Control.Concurrent.MVar.newMVar Map.empty
+      prevPublishedDiagnosticsFiles <- Control.Concurrent.MVar.newMVar []
+      elmFormat <- Control.Concurrent.MVar.newMVar Nothing
+      runLoop $ State changedFiles prevPublishedDiagnosticsFiles elmFormat
 
-  loop state
 
-  where
-    loop state =
-      do  contentLength <- readHeader
-          body <- BSLC.hGet IO.stdin (contentLength + 2)
+runLoop :: State -> IO ()
+runLoop state =
+  do  contentLength <- readHeader
+      body <- BSLC.hGet IO.stdin (contentLength + 2)
 
-          case Aeson.parseEither (\obj -> obj .: "method") =<< Aeson.eitherDecode body of
+      case Aeson.parseEither (\obj -> obj .: "method") =<< Aeson.eitherDecode body of
+        Left err ->
+          do  putStrFlushErr $ "Error decoding JSON: " ++ err
+              runLoop state
+
+        Right method ->
+          do  handleMessage state method body
+              runLoop state
+
+
+handleMessage :: State -> [Char] -> BSLC.ByteString ->  IO ()
+handleMessage state method body =
+  case method of
+    "initialize" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      id <- obj .: "id"
+                      rootPath <- params .: "rootPath" :: Aeson.Parser String
+                      initializationOptions <- params Aeson..:? "initializationOptions" :: Aeson.Parser (Maybe Aeson.Object)
+
+                      languageServer <- maybe (pure Nothing) (\obj -> obj Aeson..:? "whiletruu-elm-language-server") initializationOptions
+                      elmFormatPath <- maybe (pure Nothing) (\obj -> obj Aeson..:? "elmFormatPath") languageServer
+
+                      return ( id, rootPath, elmFormatPath)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
             Left err ->
-              do  IO.hPutStr IO.stderr $ "Error decoding JSON: " ++ err
-                  IO.hFlush IO.stderr
-                  loop state
+              putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right "initialize" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              id <- obj .: "id"
-                              rootPath <- params .: "rootPath" :: Aeson.Parser String
-                              initializationOptions <- params Aeson..:? "initializationOptions" :: Aeson.Parser (Maybe Aeson.Object)
+            Right (id, rootPath, elmFormatPath) ->
+              do  elmFormat <- getElmFormat elmFormatPath
 
-                              languageServer <- maybe (pure Nothing) (\obj -> obj Aeson..:? "whiletruu-elm-language-server") initializationOptions
-                              elmFormatPath <- maybe (pure Nothing) (\obj -> obj Aeson..:? "elmFormatPath") languageServer
+                  Control.Concurrent.MVar.modifyMVar_ (_elmFormat state) $
+                    \_ -> pure elmFormat
 
-                              return ( id, rootPath, elmFormatPath)
-                        ) =<< Aeson.eitherDecode body
+                  let response =
+                        Aeson.object
+                          [ "capabilities" .= Aeson.object
+                            [ "definitionProvider" .= True
+                            , "documentSymbolProvider" .= True
+                            , "documentFormattingProvider" .= Maybe.isJust elmFormat
+                            , "renameProvider" .= Aeson.object
+                               [ "prepareProvider" .= True
+                               ]
+                            , "textDocumentSync" .= Aeson.object
+                                 [ "openClose" .= True
+                                 , "change" .= (2 :: Int)
+                                 -- FIXME: use includeText
+                                 -- https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_didSave
+                                 , "save" .= True
+                                 ]
+                            , "referencesProvider" .= True
+                            ]
+                          , "serverInfo" .= Aeson.object
+                            [ "name" .= ("whiletruu-elm-language-server" :: String)
+                            , "version" .= ("1.0.0" :: String)
+                            ]
+                          ]
 
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr $ "Error decoding JSON: " ++ err
-                          IO.hFlush IO.stderr
-                          loop state
+                  respond id response
 
-                    Right (id, rootPath, elmFormatPath) ->
-                      do  elmFormat <- getElmFormat elmFormatPath
+    "initialized" ->
+      return ()
 
-                          Control.Concurrent.MVar.modifyMVar_ (_elmFormat state) $
-                            \_ -> pure elmFormat
+    "shutdown" ->
+      do  let result = Aeson.parseEither (\obj -> obj .: "id") =<< Aeson.eitherDecode body
 
-                          let response =
-                                Aeson.object
-                                  [ "capabilities" .= Aeson.object
-                                    [ "definitionProvider" .= True
-                                    , "documentSymbolProvider" .= True
-                                    , "documentFormattingProvider" .= Maybe.isJust elmFormat
-                                    , "renameProvider" .= Aeson.object
-                                       [ "prepareProvider" .= True
-                                       ]
-                                    , "textDocumentSync" .= Aeson.object
-                                         [ "openClose" .= True
-                                         , "change" .= (2 :: Int)
-                                         -- FIXME: use includeText
-                                         -- https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_didSave
-                                         , "save" .= True
-                                         ]
-                                    , "referencesProvider" .= True
-                                    ]
-                                  , "serverInfo" .= Aeson.object
-                                    [ "name" .= ("whiletruu-elm-language-server" :: String)
-                                    , "version" .= ("1.0.0" :: String)
-                                    ]
-                                  ]
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
 
-                          respond id response
+            Right id ->
+              respond id Aeson.Null
 
-                          loop state
+    "exit" ->
+      Exit.exitSuccess
 
-            Right "initialized" ->
-              do  loop state
+    "textDocument/didOpen" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      textDocument <- params .: "textDocument"
+                      version <- textDocument .: "version" :: Aeson.Parser Int
 
-            Right "shutdown" ->
-              do  let result = Aeson.parseEither (\obj -> obj .: "id") =<< Aeson.eitherDecode body
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+                      let filePath :: FilePath
+                          filePath = drop 7 uri
 
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr $ "Error decoding JSON: " ++ err
-                          IO.hFlush IO.stderr
-                          loop state
+                      text <- textDocument .: "text" :: Aeson.Parser String
 
-                    Right id ->
-                      do  respond id Aeson.Null
-                          loop state
+                      return (version, filePath, text)
+                ) =<< Aeson.eitherDecode body
 
-            Right "exit" ->
-              Exit.exitSuccess
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right "textDocument/didOpen" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              textDocument <- params .: "textDocument"
-                              version <- textDocument .: "version" :: Aeson.Parser Int
+            Right (version, filePath, text) ->
+              do  Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
+                    return $ Map.insert filePath (BS_UTF8.fromString text) a
 
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-                              let filePath :: FilePath
-                                  filePath = drop 7 uri
-
-                              text <- textDocument .: "text" :: Aeson.Parser String
-
-                              return (version, filePath, text)
-                        ) =<< Aeson.eitherDecode body
+                  style <- Reporting.languageServer
+                  result <- diagnostics style state filePath
 
                   case result of
                     Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
+                      showMessage MessageTypeError $ Reporting.Exit.toString $
+                        diagnosticsExitToReport err
 
-                    Right (version, filePath, text) ->
-                      do  Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
-                            return $ Map.insert filePath (BS_UTF8.fromString text) a
-
-                          style <- Reporting.languageServer
-                          result <- diagnostics style state filePath
-
-                          case result of
-                            Left err ->
-                              do  showMessage MessageTypeError $ Reporting.Exit.toString $
-                                    diagnosticsExitToReport err
-
-                                  loop state
-
-                            Right stuffs ->
-                              do  Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state) $
-                                    \prev ->
-                                      do  let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
-                                          mapM_ (\a -> publishReportDiagnostic a 1 []) diff
-
-                                          return (map (\(a,_,_) -> a) stuffs)
-
-                                  mapM_
-                                    (\(filePath, i, reports) ->
-                                      publishReportDiagnostic filePath i reports
-                                    )
-                                    stuffs
-
-                                  loop state
-
-            Right "textDocument/didSave" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              textDocument <- params .: "textDocument"
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-
-                              let filePath :: FilePath
-                                  filePath = drop 7 uri
-
-                              return filePath
-                        ) =<< Aeson.eitherDecode body
-
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
-
-                    Right filePath ->
-                      do  let mVar = _changedFiles state
-
-                          style <- Reporting.languageServer
-                          result <- diagnostics style state filePath
-
-                          case result of
-                            Left err ->
-                              do  showMessage MessageTypeError $ Reporting.Exit.toString $
-                                    diagnosticsExitToReport err
-
-                                  loop state
-
-                            Right stuffs ->
-                              do  prev <- Control.Concurrent.MVar.readMVar (_prevPublishedDiagnosticsFiles state)
-
-                                  let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
-
+                    Right stuffs ->
+                      do  Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state) $
+                            \prev ->
+                              do  let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
                                   mapM_ (\a -> publishReportDiagnostic a 1 []) diff
 
-                                  Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state)
-                                    (\a -> pure (map (\(a,_,_) -> a) stuffs))
+                                  return (map (\(a,_,_) -> a) stuffs)
 
-                                  mapM_
-                                    (\(filePath, i, reports) ->
-                                      publishReportDiagnostic filePath i reports
-                                    )
-                                    stuffs
+                          mapM_
+                            (\(filePath, i, reports) ->
+                              publishReportDiagnostic filePath i reports
+                            )
+                            stuffs
 
-                                  loop state
 
-            Right "textDocument/didClose" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              textDocument <- params .: "textDocument"
+    "textDocument/didSave" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
 
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-                              let filePath :: FilePath
-                                  filePath = drop 7 uri
+                      let filePath :: FilePath
+                          filePath = drop 7 uri
 
-                              return filePath
-                        ) =<< Aeson.eitherDecode body
+                      return filePath
+                ) =<< Aeson.eitherDecode body
 
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
 
-                    Right filePath ->
-                      do  let mVar = _changedFiles state
+            Right filePath ->
+              do  let mVar = _changedFiles state
 
-                          Control.Concurrent.MVar.modifyMVar_ mVar $ \a ->
-                            return $ Map.delete filePath a
-
-                          loop state
-
-            Right "textDocument/didChange" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              textDocument <- params .: "textDocument"
-                              version <- textDocument .: "version" :: Aeson.Parser Int
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-                              let filePath :: FilePath
-                                  filePath = drop 7 uri
-
-                              changes <-
-                                mapM parseTextDocumentContentChangeEvent =<<
-                                  params .: "contentChanges" :: Aeson.Parser [((A.Position, A.Position), String)]
-
-                              return (version, filePath, changes)
-                        ) =<< Aeson.eitherDecode body
+                  style <- Reporting.languageServer
+                  result <- diagnostics style state filePath
 
                   case result of
                     Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
+                      showMessage MessageTypeError $ Reporting.Exit.toString $
+                        diagnosticsExitToReport err
 
-                    Right (version, filePath, changes) ->
-                       do  let mVar = _changedFiles state
-                           files <- Control.Concurrent.MVar.takeMVar mVar
-                           let updatedFiles = Map.adjust (applyChanges changes) filePath files
-                           Control.Concurrent.MVar.putMVar mVar updatedFiles
+                    Right stuffs ->
+                      do  prev <- Control.Concurrent.MVar.readMVar (_prevPublishedDiagnosticsFiles state)
 
-                           loop state
+                          let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
 
-            Right "textDocument/definition" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              id <- obj .: "id" :: Aeson.Parser Int
+                          mapM_ (\a -> publishReportDiagnostic a 1 []) diff
 
-                              textDocument <- params .: "textDocument"
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
+                          Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state)
+                            (\a -> pure (map (\(a,_,_) -> a) stuffs))
 
-                              position <- params .: "position"
-                              row <- position .: "line" :: Aeson.Parser Int
-                              column <- position .: "character" :: Aeson.Parser Int
+                          mapM_
+                            (\(filePath, i, reports) ->
+                              publishReportDiagnostic filePath i reports
+                            )
+                            stuffs
 
-                              let filePath = drop 7 uri
-                              let position = A.Position
-                                               (fromIntegral row + 1)
-                                               (fromIntegral column + 1)
+    "textDocument/didClose" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      textDocument <- params .: "textDocument"
 
-                              return (id, filePath, position)
-                        ) =<< Aeson.eitherDecode body
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+                      let filePath :: FilePath
+                          filePath = drop 7 uri
+
+                      return filePath
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
+
+            Right filePath ->
+              do  let mVar = _changedFiles state
+
+                  Control.Concurrent.MVar.modifyMVar_ mVar $ \a ->
+                    return $ Map.delete filePath a
+
+    "textDocument/didChange" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      textDocument <- params .: "textDocument"
+                      version <- textDocument .: "version" :: Aeson.Parser Int
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+                      let filePath :: FilePath
+                          filePath = drop 7 uri
+
+                      changes <-
+                        mapM parseTextDocumentContentChangeEvent =<<
+                          params .: "contentChanges" :: Aeson.Parser [((A.Position, A.Position), String)]
+
+                      return (version, filePath, changes)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
+
+            Right (version, filePath, changes) ->
+               do  let mVar = _changedFiles state
+                   files <- Control.Concurrent.MVar.takeMVar mVar
+                   let updatedFiles = Map.adjust (applyChanges changes) filePath files
+                   Control.Concurrent.MVar.putMVar mVar updatedFiles
+
+    "textDocument/definition" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      id <- obj .: "id" :: Aeson.Parser Int
+
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                      position <- params .: "position"
+                      row <- position .: "line" :: Aeson.Parser Int
+                      column <- position .: "character" :: Aeson.Parser Int
+
+                      let filePath = drop 7 uri
+                      let position = A.Position
+                                       (fromIntegral row + 1)
+                                       (fromIntegral column + 1)
+
+                      return (id, filePath, position)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
+
+            Right (id, filePath, position) ->
+              do  style <- Reporting.languageServer
+                  result <- findDefinition style state filePath position
 
                   case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
+                    Right (definitionFilePath, _, _, A.At region _) ->
+                      respond id $ encodeRegion definitionFilePath region
 
-                    Right (id, filePath, position) ->
-                      do  style <- Reporting.languageServer
-                          result <- findDefinition style state filePath position
+                    Left err ->
+                      respondErr id $ Reporting.Exit.toString $
+                        definitionExitToReport filePath err
+
+    "textDocument/references" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      id <- obj .: "id" :: Aeson.Parser Int
+
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                      position <- params .: "position"
+                      row <- position .: "line" :: Aeson.Parser Int
+                      column <- position .: "character" :: Aeson.Parser Int
+
+                      let filePath = drop 7 uri
+                      let position = A.Position
+                                       (fromIntegral row + 1)
+                                       (fromIntegral column + 1)
+
+                      return (id, filePath, position)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
+
+            Right (id, filePath, position) ->
+              do  style <- Reporting.languageServer
+                  result <- findReferences style state filePath position
+
+                  case result of
+                    Right references ->
+                      respond id
+                        $ Aeson.toJSON
+                        $ concatMap (\(fp, regions) ->
+                            map (encodeRegion fp) regions
+                          ) (Map.toList references)
+
+                    Left err ->
+                      respondErr id $ Reporting.Exit.toString $
+                        definitionExitToReport filePath err
+
+    "textDocument/prepareRename" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      id <- obj .: "id" :: Aeson.Parser Int
+
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                      position <- params .: "position"
+                      row <- position .: "line" :: Aeson.Parser Int
+                      column <- position .: "character" :: Aeson.Parser Int
+
+                      let filePath = drop 7 uri
+                      let position = A.Position
+                                       (fromIntegral row + 1)
+                                       (fromIntegral column + 1)
+
+                      return (id, filePath, position)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
+
+            Right (id, filePath, position) ->
+              do  style <- Reporting.languageServer
+                  maybeTarget <- findDefinition style state filePath position
+                  case maybeTarget of
+                    Right (_, _, element, _) ->
+                      do  respond id $
+                            Aeson.object
+                              [ "range" .= encodeRange (A.toRegion element)
+                              , "placeholder" .=  (elementToRenamePlaceholder element :: String)
+                              ]
+
+                    Left _ ->
+                      respond id Aeson.Null
+
+    "textDocument/rename" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      id <- obj .: "id" :: Aeson.Parser Int
+
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                      position <- params .: "position"
+                      row <- position .: "line" :: Aeson.Parser Int
+                      column <- position .: "character" :: Aeson.Parser Int
+                      newName <- params .: "newName" :: Aeson.Parser String
+
+                      let filePath = drop 7 uri
+                      let position = A.Position
+                                       (fromIntegral row + 1)
+                                       (fromIntegral column + 1)
+
+                      return (id, filePath, position, newName)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
+
+            Right (id, filePath, position, newName) ->
+              do  style <- Reporting.languageServer
+                  result <- findReferences style state filePath position
+
+                  case result of
+                    Right references ->
+                      do  let amount = length (concat (Map.elems references))
+                          respond id $ Aeson.toJSON $
+                             encodeWorkspaceEdit references (Name.fromChars newName)
+
+                    Left err ->
+                      do  respondErr id $ Reporting.Exit.toString $
+                            definitionExitToReport filePath err
+
+    "textDocument/formatting" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      id <- obj .: "id" :: Aeson.Parser Int
+
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                      let filePath = drop 7 uri
+
+                      pure (id, filePath)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
+
+            Right (id, filePath) ->
+              do  elmFormat <- Control.Concurrent.MVar.readMVar (_elmFormat state)
+
+                  case elmFormat of
+                    Nothing ->
+                      do  respondErr id "elm-format not found"
+
+                    Just executable ->
+                      do  files <- Control.Concurrent.MVar.readMVar (_changedFiles state)
+                          source <- maybe (File.readUtf8 filePath) return $ Map.lookup filePath files
+
+                          result <-
+                            Exception.try $
+                              Proc.readCreateProcessWithExitCode (Proc.proc executable ["--stdin"]) (BS_UTF8.toString source)
+                              :: IO (Either IOError (Exit.ExitCode, String, String))
 
                           case result of
-                            Right (definitionFilePath, _, _, A.At region _) ->
-                              do  respond id $ encodeRegion definitionFilePath region
-                                  loop state
-
-                            Left err ->
-                              do  respondErr id $ Reporting.Exit.toString $
-                                    definitionExitToReport filePath err
-                                  loop state
-
-            Right "textDocument/references" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              id <- obj .: "id" :: Aeson.Parser Int
-
-                              textDocument <- params .: "textDocument"
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-
-                              position <- params .: "position"
-                              row <- position .: "line" :: Aeson.Parser Int
-                              column <- position .: "character" :: Aeson.Parser Int
-
-                              let filePath = drop 7 uri
-                              let position = A.Position
-                                               (fromIntegral row + 1)
-                                               (fromIntegral column + 1)
-
-                              return (id, filePath, position)
-                        ) =<< Aeson.eitherDecode body
-
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
-
-                    Right (id, filePath, position) ->
-                      do  style <- Reporting.languageServer
-                          result <- findReferences style state filePath position
-
-                          case result of
-                            Right references ->
-                              do  respond id
-                                    $ Aeson.toJSON
-                                    $ concatMap (\(fp, regions) ->
-                                        map (encodeRegion fp) regions
-                                      ) (Map.toList references)
-                                  loop state
-
-                            Left err ->
-                              do  respondErr id $ Reporting.Exit.toString $
-                                    definitionExitToReport filePath err
-                                  loop state
-
-            Right "textDocument/prepareRename" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              id <- obj .: "id" :: Aeson.Parser Int
-
-                              textDocument <- params .: "textDocument"
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-
-                              position <- params .: "position"
-                              row <- position .: "line" :: Aeson.Parser Int
-                              column <- position .: "character" :: Aeson.Parser Int
-
-                              let filePath = drop 7 uri
-                              let position = A.Position
-                                               (fromIntegral row + 1)
-                                               (fromIntegral column + 1)
-
-                              return (id, filePath, position)
-                        ) =<< Aeson.eitherDecode body
-
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
-
-                    Right (id, filePath, position) ->
-                      do  style <- Reporting.languageServer
-                          maybeTarget <- findDefinition style state filePath position
-                          case maybeTarget of
-                            Right (_, _, element, _) ->
-                              do  respond id $
-                                    Aeson.object
-                                      [ "range" .= encodeRange (A.toRegion element)
-                                      , "placeholder" .=  (elementToRenamePlaceholder element :: String)
-                                      ]
-                                  loop state
-
                             Left _ ->
-                              do  respond id Aeson.Null
-                                  loop state
+                              do  respondErr id $ "Failed to run elm-format: " ++ executable
 
-            Right "textDocument/rename" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              id <- obj .: "id" :: Aeson.Parser Int
+                            Right (Exit.ExitFailure _, _, stderr_ )->
+                              do  respondErr id stderr_
 
-                              textDocument <- params .: "textDocument"
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
+                            Right (Exit.ExitSuccess, stdout_, _)->
+                              let
+                                lines = BSC.split '\n' source
+                              in
+                              do  respond id $ Aeson.toJSON
+                                    [ Aeson.object
+                                        [ "range" .= Aeson.object
+                                          [ "start" .= Aeson.object
+                                              [ "line" .= (0 :: Int)
+                                              , "character" .= (0 :: Int)
+                                              ]
+                                          , "end" .= Aeson.object
+                                              [ "line" .= max 0 (length lines - 1)
+                                              , "character" .= case reverse lines of
+                                                                 last : _ -> BSC.length last
+                                                                 [] -> 0
+                                              ]
+                                          ]
+                                        , "newText" .= stdout_
+                                        ]
+                                    ]
 
-                              position <- params .: "position"
-                              row <- position .: "line" :: Aeson.Parser Int
-                              column <- position .: "character" :: Aeson.Parser Int
-                              newName <- params .: "newName" :: Aeson.Parser String
+    "textDocument/documentSymbol" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      id <- obj .: "id" :: Aeson.Parser Int
 
-                              let filePath = drop 7 uri
-                              let position = A.Position
-                                               (fromIntegral row + 1)
-                                               (fromIntegral column + 1)
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
 
-                              return (id, filePath, position, newName)
-                        ) =<< Aeson.eitherDecode body
+                      let filePath = drop 7 uri
 
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
+                      return (id, filePath)
+                ) =<< Aeson.eitherDecode body
 
-                    Right (id, filePath, position, newName) ->
-                      do  style <- Reporting.languageServer
-                          result <- findReferences style state filePath position
+          case result of
+            Left err ->
+              putStrFlushErr $ "Error decoding JSON: " ++ err
 
-                          case result of
-                            Right references ->
-                              do  let amount = length (concat (Map.elems references))
-                                  respond id $ Aeson.toJSON $
-                                     encodeWorkspaceEdit references (Name.fromChars newName)
-                                  loop state
-
-                            Left err ->
-                              do  respondErr id $ Reporting.Exit.toString $
-                                    definitionExitToReport filePath err
-                                  loop state
-
-            Right "textDocument/formatting" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              id <- obj .: "id" :: Aeson.Parser Int
-
-                              textDocument <- params .: "textDocument"
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-
-                              let filePath = drop 7 uri
-
-                              pure (id, filePath)
-                        ) =<< Aeson.eitherDecode body
+            Right (id, filePath) ->
+              do  style <- Reporting.languageServer
+                  result <- getSymbols style state filePath
 
                   case result of
+                    Right symbols ->
+                      respond id $ Aeson.toJSON $ map symbolInfoToJson symbols
+
                     Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
+                      respondErr id $ Reporting.Exit.toString $
+                        definitionExitToReport filePath err
 
-                    Right (id, filePath) ->
-                      do  elmFormat <- Control.Concurrent.MVar.readMVar (_elmFormat state)
+    unknownMethod ->
+      putStrFlushErr $ "Unknown method: " ++ unknownMethod
 
-                          case elmFormat of
-                            Nothing ->
-                              do  respondErr id "elm-format not found"
-                                  loop state
 
-                            Just executable ->
-                              do  files <- Control.Concurrent.MVar.readMVar (_changedFiles state)
-                                  source <- maybe (File.readUtf8 filePath) return $ Map.lookup filePath files
-
-                                  result <-
-                                    Exception.try $
-                                      Proc.readCreateProcessWithExitCode (Proc.proc executable ["--stdin"]) (BS_UTF8.toString source)
-                                      :: IO (Either IOError (Exit.ExitCode, String, String))
-
-                                  case result of
-                                    Left _ ->
-                                      do  respondErr id $ "Failed to run elm-format: " ++ executable
-                                          loop state
-
-                                    Right (Exit.ExitFailure _, _, stderr_ )->
-                                      do  respondErr id stderr_
-                                          loop state
-
-                                    Right (Exit.ExitSuccess, stdout_, _)->
-                                      let
-                                        lines = BSC.split '\n' source
-                                      in
-                                      do  respond id $ Aeson.toJSON
-                                            [ Aeson.object
-                                                [ "range" .= Aeson.object
-                                                  [ "start" .= Aeson.object
-                                                      [ "line" .= (0 :: Int)
-                                                      , "character" .= (0 :: Int)
-                                                      ]
-                                                  , "end" .= Aeson.object
-                                                      [ "line" .= max 0 (length lines - 1)
-                                                      , "character" .= case reverse lines of
-                                                                         last : _ -> BSC.length last
-                                                                         [] -> 0
-                                                      ]
-                                                  ]
-                                                , "newText" .= stdout_
-                                                ]
-                                            ]
-                                          loop state
-
-            Right "textDocument/documentSymbol" ->
-              do  let result =
-                        Aeson.parseEither (\obj ->
-                          do  params <- obj .: "params"
-                              id <- obj .: "id" :: Aeson.Parser Int
-
-                              textDocument <- params .: "textDocument"
-                              uri <- textDocument .: "uri" :: Aeson.Parser String
-
-                              let filePath = drop 7 uri
-
-                              return (id, filePath)
-                        ) =<< Aeson.eitherDecode body
-
-                  case result of
-                    Left err ->
-                      do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
-                          loop state
-
-                    Right (id, filePath) ->
-                      do  style <- Reporting.languageServer
-                          result <- getSymbols style state filePath
-
-                          case result of
-                            Right symbols ->
-                              do  respond id $ Aeson.toJSON $ map symbolInfoToJson symbols
-
-                                  loop state
-
-                            Left err ->
-                              do  respondErr id $ Reporting.Exit.toString $
-                                    definitionExitToReport filePath err
-
-                                  loop state
-
-            Right unknownMethod ->
-              do  IO.hPutStr IO.stderr ("Unknown method: " ++ unknownMethod)
-                  IO.hFlush IO.stderr
-                  loop state
+putStrFlushErr :: String -> IO ()
+putStrFlushErr str =
+  IO.hPutStr IO.stderr str >> IO.hFlush IO.stderr
 
 
 parsePosition :: Aeson.Value -> Aeson.Parser A.Position
