@@ -631,33 +631,20 @@ run = do
                           loop state
 
                     Right (id, filePath) ->
-                      do  let workDoneToken = "document-symbols"
-                          sendCreateWorkDoneProgress workDoneToken
-                          sendProgressBegin workDoneToken "Finding symbols"
-
-                          style <- Reporting.languageServer
+                      do  style <- Reporting.languageServer
                           result <- getSymbols style state filePath
-                          endTime <- Data.Time.getCurrentTime
-                          let timeDiff = Data.Time.diffUTCTime endTime startTime
 
                           case result of
                             Right symbols ->
-                              do  sendProgressEnd workDoneToken $
-                                    "Got result in " ++ show timeDiff
-
-                                  respond id $ Aeson.toJSON $
-                                    map symbolInfoToJson symbols
+                              do  respond id $ Aeson.toJSON $ map symbolInfoToJson symbols
 
                                   loop state
 
                             Left err ->
-                              do  sendProgressEnd workDoneToken $
-                                    "Failed in " ++ show timeDiff
-
-                                  respondErr id $ Reporting.Exit.toString $
+                              do  respondErr id $ Reporting.Exit.toString $
                                     definitionExitToReport filePath err
-                                  loop state
 
+                                  loop state
 
             Right unknownMethod ->
               do  IO.hPutStr IO.stderr ("Unknown method: " ++ unknownMethod)
@@ -3043,24 +3030,25 @@ getSymbols ::
   -> FilePath
   -> IO (Either DefinitionExit [SymbolInfo])
 getSymbols style state filePath =
-  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
-      case maybeRoot of
-        Just root -> getSymbolsHelp style root state filePath
-        Nothing   -> return $ Left DefinitionExitNoRoot
+  Task.run $
+    do  root <- Task.mio DefinitionExitNoRoot $
+           Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+        details <- Task.eio DefinitionExitBadDetails $
+          BW.withScope $ \scope ->
+            Stuff.withRootLock root (Details.load style scope root)
+
+        getSymbolsHelp details root state filePath
 
 
 getSymbolsHelp ::
-  Reporting.Style
+  Details.Details
   -> FilePath
   -> State
   -> FilePath
-  -> IO (Either DefinitionExit [SymbolInfo])
-getSymbolsHelp style root state filePath =
-  BW.withScope $ \scope ->
-  Stuff.withRootLock root $ Task.run $
-  do  details <- Task.eio DefinitionExitBadDetails $ Details.load style scope root
-
-      src <-
+  -> Task.Task DefinitionExit [SymbolInfo]
+getSymbolsHelp details root state filePath =
+  Task.eio id $ LsReporting.trackDocumentSymbol $ Task.run $
+  do  src <-
         case Details._outline details of
           Details.ValidApp _ -> loadSrcModuleByPath state filePath
           Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath

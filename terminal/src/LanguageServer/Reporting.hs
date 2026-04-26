@@ -8,6 +8,7 @@ module LanguageServer.Reporting
   , RefsMsg(..)
   , trackReferences
   , trackDefinition
+  , trackDocumentSymbol
   )
   where
 
@@ -122,6 +123,23 @@ trackDefinition callback =
       return answer
 
 
+-- DOCUMENT SYMBOL
+
+
+trackDocumentSymbol :: IO a -> IO a
+trackDocumentSymbol callback =
+  do  timeStart <- Data.Time.getCurrentTime
+
+      sendCreateWorkDoneProgress "documentSymbol"
+      sendProgressBegin "documentSymbol" "👀 Looking for symbols"
+
+      answer <- callback
+
+      timeEnd <- Data.Time.getCurrentTime
+      let timeDiff = Data.Time.diffUTCTime timeEnd timeStart
+      sendProgressEnd "documentSymbols" $ "Done (" ++ show timeDiff ++ ")"
+
+      return answer
 
 --
 
