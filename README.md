@@ -14,6 +14,7 @@ A language server should be *fast* and *reliable*. The Elm compiler is both of t
 - __Diagnostics__ (compiler errors)
 ![diagnostics](images/language-server-diagnostics.gif?raw=true)
 - __Document symbols__
+![symbols](images/language-server-symbols.gif?raw=true)
 - __Formatting__ with `elm-format` (enabled when executable is available on init)
 - __Rename__ (based on references, supports the same stuff)
 
