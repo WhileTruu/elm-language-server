@@ -124,7 +124,6 @@ run = do
     loop state =
       do  contentLength <- readHeader
           body <- BSLC.hGet IO.stdin (contentLength + 2)
-          startTime <- Data.Time.getCurrentTime
 
           case Aeson.parseEither (\obj -> obj .: "method") =<< Aeson.eitherDecode body of
             Left err ->
@@ -390,7 +389,6 @@ run = do
                     Right (id, filePath, position) ->
                       do  style <- Reporting.languageServer
                           result <- findDefinition style state filePath position
-                          endTime <- Data.Time.getCurrentTime
 
                           case result of
                             Right (definitionFilePath, _, _, A.At region _) ->
@@ -516,30 +514,18 @@ run = do
                           loop state
 
                     Right (id, filePath, position, newName) ->
-                      do  let workDoneToken = "rename"
-                          sendCreateWorkDoneProgress workDoneToken
-                          sendProgressBegin workDoneToken "✏️ Renaming"
-
-                          style <- Reporting.languageServer
+                      do  style <- Reporting.languageServer
                           result <- findReferences style state filePath position
-                          endTime <- Data.Time.getCurrentTime
-                          let timeDiff = Data.Time.diffUTCTime endTime startTime
 
                           case result of
                             Right references ->
                               do  let amount = length (concat (Map.elems references))
-                                  sendProgressEnd workDoneToken $
-                                    "Found " ++ show amount ++ " in " ++ show timeDiff
-
                                   respond id $ Aeson.toJSON $
                                      encodeWorkspaceEdit references (Name.fromChars newName)
                                   loop state
 
                             Left err ->
-                              do  sendProgressEnd workDoneToken $
-                                    "Failed to rename in " ++ show timeDiff
-
-                                  respondErr id $ Reporting.Exit.toString $
+                              do  respondErr id $ Reporting.Exit.toString $
                                     definitionExitToReport filePath err
                                   loop state
 
