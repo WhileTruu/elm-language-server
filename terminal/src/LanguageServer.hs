@@ -1635,7 +1635,18 @@ findElementInValues pos values =
     (\located found ->
       case located of
         A.At region (Src.Value name patterns body type_) ->
-          let a =
+          let inPatterns =
+                  List.foldr
+                    (\pattern@(A.At region _) acc ->
+                      if isInRegion pos region then
+                        findElementInPattern pos [] patterns pattern
+                      else
+                        acc
+                    )
+                    Nothing
+                    patterns
+
+              a =
                 if isPositionOnValueName pos located
                   then Just (A.At (A.toRegion name) (EVar [] [] Src.LowVar (A.toValue name)))
                 else if isInRegion pos region
@@ -1644,7 +1655,7 @@ findElementInValues pos values =
 
               b = findElementInType pos Control.Monad.=<< type_
           in
-          a <|> b <|> found
+          inPatterns <|> a <|> b <|> found
     )
     Nothing
     values
@@ -1767,7 +1778,15 @@ findElementInExpr position defs patterns expr@(A.At region _) =
       if isInRegion position (A.toRegion body) then
         findElementInExpr position defs (srcArgs ++ patterns) body
       else
-        Nothing
+        List.foldr
+          (\arg acc ->
+            if isInRegion position (A.toRegion arg) then
+              findElementInPattern position defs (srcArgs ++ patterns) arg
+            else
+              acc
+          )
+          Nothing
+          srcArgs
 
     Src.Call func args ->
       if isInRegion position (A.toRegion func) then
@@ -1807,18 +1826,32 @@ findElementInExpr position defs patterns expr@(A.At region _) =
           (\def acc ->
               case (A.toValue def) of
                 Src.Define _ patterns1 expr type_ ->
-                  let a = if isInRegion position (A.toRegion expr) then
-                            findElementInExpr position (def : defs) (patterns1 ++ patterns) expr
+                  let
+                      inPatterns =
+                        List.foldr
+                          (\pattern acc1 ->
+                            if isInRegion position (A.toRegion pattern) then
+                              findElementInPattern position (def : defs) (patterns1 ++ patterns) pattern
+                            else
+                              acc1
+                          )
+                          Nothing
+                          patterns1
 
-                          else
-                            acc
+                      a =
+                        if isInRegion position (A.toRegion expr) then
+                          findElementInExpr position (def : defs) (patterns1 ++ patterns) expr
+                        else
+                          acc
 
                       b = findElementInType position Control.Monad.=<< type_
                   in
-                  a <|> b <|> acc
+                  inPatterns <|> a <|> b <|> acc
 
                 Src.Destruct pattern expr ->
-                  if isInRegion position (A.toRegion expr) then
+                  if isInRegion position (A.toRegion pattern) then
+                    findElementInPattern position (def : defs) (pattern : patterns) pattern
+                  else if isInRegion position (A.toRegion expr) then
                     findElementInExpr position (def : defs) (pattern : patterns) expr
                   else
                     acc
@@ -1832,7 +1865,9 @@ findElementInExpr position defs patterns expr@(A.At region _) =
       else
         foldr
           (\(pattern, branch) acc ->
-            if isInRegion position (A.toRegion branch) then
+            if isInRegion position (A.toRegion pattern) then
+              findElementInPattern position defs (pattern : patterns) pattern
+            else if isInRegion position (A.toRegion branch) then
               findElementInExpr position defs (pattern : patterns) branch
             else
               acc
@@ -1894,6 +1929,116 @@ findElementInExpr position defs patterns expr@(A.At region _) =
         (a : b : cs)
 
     Src.Shader _ _ ->
+      Nothing
+
+
+findElementInPattern
+  :: A.Position
+  -> [A.Located Src.Def]
+  -> [Src.Pattern]
+  -> Src.Pattern
+  -> Maybe Element
+findElementInPattern pos defs patterns pattern_ =
+  case A.toValue pattern_ of
+    Src.PAnything ->
+      Nothing
+
+    Src.PVar name ->
+      Just $ A.At (A.toRegion pattern_) $
+        EVar defs patterns Src.LowVar name
+
+    Src.PRecord names ->
+      List.foldr
+        (\(A.At region name) acc ->
+          if isInRegion pos region then
+            Just $ A.At region $ EVar defs patterns Src.LowVar name
+          else
+            acc
+        )
+        Nothing
+        names
+
+    Src.PAlias pattern (A.At region alias) ->
+      if isInRegion pos region then
+        Just $ A.At region $ EVar defs patterns Src.LowVar alias
+      else
+        findElementInPattern pos defs patterns pattern
+
+    Src.PUnit ->
+      Nothing
+
+    Src.PTuple a b rest ->
+      List.foldr
+        (\pattern@(A.At region _) acc ->
+          if isInRegion pos region then
+            findElementInPattern pos defs patterns pattern
+          else
+            acc
+        )
+        Nothing
+        (a : b : rest)
+
+    Src.PCtor region name args ->
+      let
+        maybeElement =
+          List.foldr
+            (\pattern@(A.At region _) acc ->
+              if isInRegion pos region then
+                findElementInPattern pos defs patterns pattern
+              else
+                acc
+            )
+            Nothing
+            args
+      in
+      maybeElement <|>
+        if isInRegion pos region then
+          Just $ A.At region $ EVar defs patterns Src.CapVar name
+        else
+          Nothing
+
+
+    Src.PCtorQual region qual name args ->
+      let
+        maybeElement =
+          List.foldr
+            (\pattern@(A.At region _) acc ->
+              if isInRegion pos region then
+                findElementInPattern pos defs patterns pattern
+              else
+                acc
+            )
+            Nothing
+            args
+      in
+      maybeElement <|>
+        if isInRegion pos region then
+          Just $ A.At region $ EVarQual defs patterns Src.CapVar qual name
+        else
+          Nothing
+
+    Src.PList patterns ->
+        List.foldr
+          (\pattern@(A.At region _) acc ->
+            if isInRegion pos region then
+              findElementInPattern pos defs patterns pattern
+            else
+              acc
+          )
+          Nothing
+          patterns
+
+    Src.PCons a b ->
+      findElementInPattern pos defs patterns a <|>
+        findElementInPattern pos defs patterns b
+
+    Src.PChr _ ->
+      Nothing
+
+    Src.PStr _ ->
+      Nothing
+
+    Src.PInt _ ->
       Nothing
 
 
