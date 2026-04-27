@@ -1241,8 +1241,11 @@ findDefinitionForCapVarQualInImports state details root imports qual name =
   let
     potentialSources =
       filter
-        (\import_@(Src.Import iName iAlias iExposing) ->
-          A.toValue iName == qual || Just qual == fmap A.toValue iAlias
+        (\(Src.Import iName iAlias _) ->
+          if Maybe.isNothing iAlias then
+            qual == A.toValue iName
+          else
+            Just qual == fmap A.toValue iAlias
         )
         imports
   in
@@ -1306,9 +1309,12 @@ findDefinitionForLowVarQualInImports ::
 findDefinitionForLowVarQualInImports state details root imports qual name =
   let
     potentialSources =
-      filter
-        (\import_@(Src.Import iName iAlias iExposing) ->
-          A.toValue iName == qual || Just qual == fmap A.toValue iAlias
+      List.filter
+        (\(Src.Import iName iAlias _) ->
+          if Maybe.isNothing iAlias then
+            qual == A.toValue iName
+          else
+            Just qual == fmap A.toValue iAlias
         )
         imports
   in
