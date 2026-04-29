@@ -1014,7 +1014,7 @@ findDefinitionForElement ::
   -> IO (Either DefinitionExit (FilePath, Src.Module, Found))
 findDefinitionForElement state details root path src element =
     case element of
-      EVar defs patterns Src.LowVar name ->
+      EVar defs patterns name ->
         -- FIXME: first found exposed low var is returned. Which may or may not be
         -- correct.
         --
@@ -1051,16 +1051,32 @@ findDefinitionForElement state details root path src element =
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element)
 
-      EVarQual _ _ Src.LowVar mod name ->
+      EVarQual mod name ->
        fmap
          (\a -> a
            >>= fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound element)) Right
          )
          (findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name)
 
-      EVar _ _ Src.CapVar name ->
-        do  let local = findDefinitionForCapVarLocally src name
-            external <- findDefinitionForCapVarInImports state details root (Src._imports src) name
+      ECtor name ->
+        do  let local = findDefinitionForCtorInModule name src
+            let potentialSources =
+                  filter
+                    (\import_@(Src.Import iName iAlias iExposing) ->
+                      case iExposing of
+                        Src.Open -> True
+                        Src.Explicit exposed -> any (\exposed ->
+                            case exposed of
+                              Src.Lower _ -> False
+                              Src.Upper (A.At _ name_) Src.Private -> name_ == name
+                              Src.Upper _ _ -> True
+                              Src.Operator _ _ -> False
+                          )
+                          exposed
+                    )
+                    (Src._imports src)
+            external <- findDefinitionInImports state details root potentialSources $
+                          findDefinitionForCtorInModule name
 
             return $
               case (local, external) of
@@ -1069,9 +1085,69 @@ findDefinitionForElement state details root path src element =
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element)
 
-      EVarQual _ _ Src.CapVar mod name ->
-         findDefinitionForCapVarQualInImports state details root (Src._imports src) mod name
-         & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound element)) Right)
+      ECtorQual qual name ->
+        let
+          potentialSources =
+            filter
+              (\(Src.Import iName iAlias _) ->
+                if Maybe.isNothing iAlias then
+                  qual == A.toValue iName
+                else
+                  Just qual == fmap A.toValue iAlias
+              )
+              (Src._imports src)
+         in
+         (findDefinitionInImports state details root potentialSources $
+            findDefinitionForCtorInModule name
+         )
+            & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound element)) Right)
+
+      EType name ->
+        do  let local = findDefinitionForTypeInModule name src
+            let potentialSources =
+                  filter
+                    (\import_@(Src.Import iName iAlias iExposing) ->
+                      case iExposing of
+                        Src.Open -> True
+                        Src.Explicit exposed -> any (\exposed ->
+                            case exposed of
+                              Src.Lower _ -> False
+                              Src.Upper (A.At _ name_) Src.Private -> name_ == name
+                              Src.Upper _ _ -> True
+                              Src.Operator _ _ -> False
+                          )
+                          exposed
+                    )
+                    (Src._imports src)
+            external <- findDefinitionInImports state details root potentialSources $
+                          findDefinitionForTypeInModule name
+
+            return $
+              case (local, external) of
+                (Just a, _) -> Right (path, src, a)
+                (Nothing, Right (Just a)) -> Right a
+                (Nothing, Left a) -> Left a
+                (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element)
+
+      ETypeQual qual name ->
+        let
+          potentialSources =
+            filter
+              (\(Src.Import iName iAlias _) ->
+                if Maybe.isNothing iAlias then
+                  qual == A.toValue iName
+                else
+                  Just qual == fmap A.toValue iAlias
+              )
+              (Src._imports src)
+         in
+         (findDefinitionInImports state details root potentialSources $
+            findDefinitionForTypeInModule name
+         )
+            & fmap (\a -> a >>= maybe (Left (DefinitionExitNotFound element)) Right)
+
+      EAccess _ _ _ _ ->
+        return (Left (DefinitionExitNoElement))
 
       EInfix name_ ->
         fmap
@@ -1103,129 +1179,6 @@ findDefinitionForModuleName state details root moduleName =
 
         Left exit ->
           return $ Left exit
-
-
-findDefinitionForCapVarLocally :: Src.Module -> Name -> Maybe Found
-findDefinitionForCapVarLocally src name =
-  let
-    inAliases =
-      foldr
-        (\(A.At _ alias@(Src.Alias (A.At region aliasName) _ _)) acc ->
-          if aliasName == name then Just (A.At region (FoundAlias alias)) else acc
-        )
-        Nothing
-        (Src._aliases src)
-
-    inUnions =
-      foldr
-        (\(A.At _ union@(Src.Union (A.At region unionName) _ variants)) acc ->
-          if unionName == name
-            then Just (A.At region (FoundUnion union))
-            else
-              foldr
-                (\a acc1 ->
-                  if A.toValue (fst a) == name
-                    then Just (A.At (A.toRegion (fst a)) (FoundVariant a))
-                    else acc1
-                )
-                acc
-                variants
-        )
-        Nothing
-        (Src._unions src)
-  in
-  inAliases <|> inUnions
-
-
-findDefinitionForCapVarInImports ::
-  State
-  -> Details.Details
-  -> FilePath
-  -> [Src.Import]
-  -> Name
-  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
-findDefinitionForCapVarInImports state details root imports name =
-  let
-    potentialSources =
-      filter
-        (\import_@(Src.Import iName iAlias iExposing) ->
-          case iExposing of
-            Src.Open -> True
-            Src.Explicit exposed -> any (\exposed ->
-                case exposed of
-                  Src.Lower _ -> False
-                  Src.Upper (A.At _ name_) Src.Private -> name_ == name
-                  Src.Upper _ _ -> True
-                  Src.Operator _ _ -> False
-              )
-              exposed
-        )
-        imports
-  in
-  foldr
-    (\import_ acc ->
-      do  x <- findDefinitionForCapVarInModule state details root (Src.getImportName import_) name
-          y <- acc
-
-          case (y, x) of
-            (Left _, x) -> return x
-            (Right Nothing, _) -> return x
-            (Right (Just _), _) -> return y
-    )
-    (return (Right Nothing))
-    potentialSources
-
-
-findDefinitionForCapVarInModule ::
-  State
-  -> Details.Details
-  -> FilePath
-  -> ModuleName.Raw
-  -> Name
-  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
-findDefinitionForCapVarInModule state details root moduleName name =
-  do  pathAndSrc <- loadSrcModule state details root moduleName
-
-      case pathAndSrc of
-        Right (path, src) ->
-          return $ Right $ fmap (\a -> (path, src, a)) $ findDefinitionForCapVarLocally src name
-
-        Left exit ->
-          return $ Left exit
-
-
-findDefinitionForCapVarQualInImports ::
-  State
-  -> Details.Details
-  -> FilePath
-  -> [Src.Import]
-  -> Name
-  -> Name
-  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
-findDefinitionForCapVarQualInImports state details root imports qual name =
-  let
-    potentialSources =
-      filter
-        (\(Src.Import iName iAlias _) ->
-          if Maybe.isNothing iAlias then
-            qual == A.toValue iName
-          else
-            Just qual == fmap A.toValue iAlias
-        )
-        imports
-  in
-  foldr
-    (\import_ acc ->
-      do  x <- findDefinitionForCapVarInModule state details root (Src.getImportName import_) name
-          y <- acc
-
-          case (y, x) of
-            (Left _, x) -> return x
-            (Right Nothing, _) -> return x
-            (Right (Just _), _) -> return y
-    )
-    (return (Right Nothing))
-    potentialSources
 
 
 findDefinitionForLowVarLocally :: Src.Module -> [A.Located Src.Def] -> [Src.Pattern] -> Name -> Maybe Found
@@ -1333,6 +1286,99 @@ findDefinitionForLowVarInImports state details root imports name =
     )
     (return (Right Nothing))
     potentialSources
+
+
+findDefinitionInImports ::
+  State
+  -> Details.Details
+  -> FilePath
+  -> [Src.Import]
+  -> (Src.Module -> Maybe Found)
+  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
+findDefinitionInImports state details root imports find =
+  foldr
+    (\import_ acc ->
+      do  x <- findDefinitionInModule state details root (Src.getImportName import_) find
+          y <- acc
+
+          case (y, x) of
+            (Left _, x) -> return x
+            (Right Nothing, _) -> return x
+            (Right (Just _), _) -> return y
+    )
+    (return (Right Nothing))
+    imports
+
+
+findDefinitionInModule ::
+  State
+  -> Details.Details
+  -> FilePath
+  -> ModuleName.Raw
+  -> (Src.Module -> Maybe Found)
+  -> IO (Either DefinitionExit (Maybe (FilePath, Src.Module, Found)))
+findDefinitionInModule state details root moduleName find =
+  do  pathAndSrc <- loadSrcModule state details root moduleName
+
+      case pathAndSrc of
+        Right (path, src) ->
+          return $ Right $ fmap (\a -> (path, src, a)) $ find src
+
+        Left exit ->
+          return $ Left exit
+
+
+findDefinitionForCtorInModule :: Name -> Src.Module -> Maybe Found
+findDefinitionForCtorInModule name src =
+  let
+    inAliases =
+      foldr
+        (\(A.At _ alias@(Src.Alias (A.At region aliasName) _ _)) acc ->
+          if aliasName == name then Just (A.At region (FoundAlias alias)) else acc
+        )
+        Nothing
+        (Src._aliases src)
+
+    inUnions =
+      foldr
+        (\(A.At _ union@(Src.Union (A.At region unionName) _ variants)) acc ->
+          foldr
+            (\a acc1 ->
+              if A.toValue (fst a) == name
+                then Just (A.At (A.toRegion (fst a)) (FoundVariant a))
+                else acc1
+            )
+            acc
+            variants
+        )
+        Nothing
+        (Src._unions src)
+  in
+  inAliases <|> inUnions
+
+
+findDefinitionForTypeInModule :: Name -> Src.Module -> Maybe Found
+findDefinitionForTypeInModule name src =
+  let
+    inAliases =
+      foldr
+        (\(A.At _ alias@(Src.Alias (A.At region aliasName) _ _)) acc ->
+          if aliasName == name then Just (A.At region (FoundAlias alias)) else acc
+        )
+        Nothing
+        (Src._aliases src)
+
+    inUnions =
+      foldr
+        (\(A.At _ union@(Src.Union (A.At region unionName) _ variants)) acc ->
+          if unionName == name
+            then Just (A.At region (FoundUnion union))
+            else Nothing
+        )
+        Nothing
+        (Src._unions src)
+  in
+  inAliases <|> inUnions
 
 
 findDefinitionForInfixInImports ::
@@ -1456,8 +1502,12 @@ type Element = A.Located Element_
 
 
 data Element_
-  = EVar [A.Located Src.Def] [Src.Pattern] Src.VarType Name
-  | EVarQual [A.Located Src.Def] [Src.Pattern] Src.VarType Name Name
+  = EVar [A.Located Src.Def] [Src.Pattern] Name
+  | EVarQual Name Name
+  | ECtor Name
+  | ECtorQual Name Name
+  | EType Name
+  | ETypeQual Name Name
   | EAccess [A.Located Src.Def] [Src.Pattern] Src.Expr Name
   | EInfix Name
   | EModuleName Name
@@ -1466,9 +1516,9 @@ data Element_
 elementToStr :: Element_ -> String
 elementToStr element =
   case element of
-    EVar _ _ _ name ->
+    EVar _ _ name ->
       Name.toChars name ++ " (Var)"
-    EVarQual _ _ _ prefix name ->
+    EVarQual prefix name ->
       Name.toChars prefix ++ "." ++ Name.toChars name ++ " (VarQual)"
     EAccess _ _ record field ->
       "." ++ Name.toChars field ++ " (Access)"
@@ -1481,9 +1531,9 @@ elementToStr element =
 elementToRenamePlaceholder :: Element -> String
 elementToRenamePlaceholder element =
   case A.toValue element of
-    EVar _ _ _ name ->
+    EVar _ _ name ->
       Name.toChars name
-    EVarQual _ _ _ prefix name ->
+    EVarQual prefix name ->
       Name.toChars name
     EAccess _ _ record field ->
       Name.toChars field
@@ -1513,11 +1563,11 @@ findElementInExports pos exposing =
             case a of
               Src.Lower name ->
                 if isInRegion pos (A.toRegion name)
-                  then Just $ A.At (A.toRegion name) $ EVar [] [] Src.LowVar (A.toValue name)
+                  then Just $ A.At (A.toRegion name) $ EVar [] [] (A.toValue name)
                   else acc
               Src.Upper name _ ->
                 if isInRegion pos (A.toRegion name)
-                  then Just $ A.At (A.toRegion name) $ EVar [] [] Src.CapVar (A.toValue name)
+                  then Just $ A.At (A.toRegion name) $ EType (A.toValue name)
                   else acc
               Src.Operator region name ->
                 if isInRegion pos region
@@ -1536,7 +1586,7 @@ findElementInAliases pos aliases =
     (\(A.At region (Src.Alias name _ type_)) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
+              then Just (A.At (A.toRegion name) (EType (A.toValue name)))
               else Nothing
 
           b = findElementInType pos type_
@@ -1553,7 +1603,7 @@ findElementInUnions pos unions =
     (\(A.At region (Src.Union name _ variants)) found ->
       let a =
             if isInRegion pos (A.toRegion name)
-              then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
+              then Just (A.At (A.toRegion name) (EType (A.toValue name)))
               else Nothing
 
           b =
@@ -1561,7 +1611,7 @@ findElementInUnions pos unions =
               (\(name_, types) found_ ->
                 let a_ =
                       if isInRegion pos (A.toRegion name_)
-                        then Just (A.At (A.toRegion name_) (EVar [] [] Src.CapVar (A.toValue name_)))
+                        then Just (A.At (A.toRegion name_) (ECtor (A.toValue name_)))
                         else Nothing
 
                     b_ =
@@ -1607,12 +1657,12 @@ findElementInImports pos imports =
                     case a of
                       Src.Lower name ->
                         if isInRegion pos (A.toRegion name)
-                          then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
+                          then Just (A.At (A.toRegion name) (EVar [] [] (A.toValue name)))
                           else acc
 
                       Src.Upper name _ ->
                         if isInRegion pos (A.toRegion name)
-                          then Just (A.At (A.toRegion name) (EVar [] [] Src.CapVar (A.toValue name)))
+                          then Just (A.At (A.toRegion name) (EType (A.toValue name)))
                           else acc
 
                       Src.Operator region name ->
@@ -1648,7 +1698,7 @@ findElementInValues pos values =
 
               a =
                 if isPositionOnValueName pos located
-                  then Just (A.At (A.toRegion name) (EVar [] [] Src.LowVar (A.toValue name)))
+                  then Just (A.At (A.toRegion name) (EVar [] [] (A.toValue name)))
                 else if isInRegion pos region
                   then findElementInExpr pos [] patterns body
                 else Nothing
@@ -1674,12 +1724,12 @@ findElementInType pos type_ =
 
         Src.TType region name tlist ->
           if isInRegion pos region
-            then Just (A.At region (EVar [] [] Src.CapVar name))
+            then Just (A.At region (EType name))
             else foldr (\a acc -> findElementInType pos a <|> acc) Nothing tlist
 
         Src.TTypeQual region qual name tlist ->
           if isInRegion pos region
-            then Just (A.At region (EVarQual [] [] Src.CapVar qual name))
+            then Just (A.At region (ETypeQual qual name))
             else foldr (\a acc -> findElementInType pos a <|> acc) Nothing tlist
 
         Src.TRecord fields extRecord ->
@@ -1733,10 +1783,14 @@ findElementInExpr position defs patterns expr@(A.At region _) =
       Nothing
 
     Src.Var varType name ->
-      Just $ A.At region $ EVar defs patterns varType name
+      case varType of
+        Src.LowVar -> Just $ A.At region $ EVar defs patterns name
+        Src.CapVar -> Just $ A.At region $ ECtor name
 
     Src.VarQual varType prefix name ->
-      Just $ A.At region $ EVarQual defs patterns varType prefix name
+      case varType of
+        Src.LowVar -> Just $ A.At region $ EVarQual prefix name
+        Src.CapVar -> Just $ A.At region $ ECtorQual prefix name
 
     Src.List exprs ->
       foldr
@@ -1888,13 +1942,13 @@ findElementInExpr position defs patterns expr@(A.At region _) =
 
     Src.Update starter fields ->
       if isInRegion position (A.toRegion starter) then
-        Just $ A.At (A.toRegion starter) $ EVar defs patterns Src.LowVar (A.toValue starter)
+        Just $ A.At (A.toRegion starter) $ EVar defs patterns (A.toValue starter)
 
       else
         foldr
           (\(field, value) acc ->
             if isInRegion position (A.toRegion field) then
-              Just $ A.At (A.toRegion field) $ EVar defs patterns Src.LowVar (A.toValue field)
+              Just $ A.At (A.toRegion field) $ EVar defs patterns (A.toValue field)
             else if isInRegion position (A.toRegion value) then
               findElementInExpr position defs patterns value
             else
@@ -1945,13 +1999,13 @@ findElementInPattern pos defs patterns pattern_ =
 
     Src.PVar name ->
       Just $ A.At (A.toRegion pattern_) $
-        EVar defs patterns Src.LowVar name
+        EVar defs patterns name
 
     Src.PRecord names ->
       List.foldr
         (\(A.At region name) acc ->
           if isInRegion pos region then
-            Just $ A.At region $ EVar defs patterns Src.LowVar name
+            Just $ A.At region $ EVar defs patterns name
           else
             acc
         )
@@ -1960,7 +2014,7 @@ findElementInPattern pos defs patterns pattern_ =
 
     Src.PAlias pattern (A.At region alias) ->
       if isInRegion pos region then
-        Just $ A.At region $ EVar defs patterns Src.LowVar alias
+        Just $ A.At region $ EVar defs patterns alias
       else
         findElementInPattern pos defs patterns pattern
 
@@ -1993,7 +2047,7 @@ findElementInPattern pos defs patterns pattern_ =
       in
       maybeElement <|>
         if isInRegion pos region then
-          Just $ A.At region $ EVar defs patterns Src.CapVar name
+          Just $ A.At region $ ECtor name
         else
           Nothing
 
@@ -2013,7 +2067,7 @@ findElementInPattern pos defs patterns pattern_ =
       in
       maybeElement <|>
         if isInRegion pos region then
-          Just $ A.At region $ EVarQual defs patterns Src.CapVar qual name
+          Just $ A.At region $ ECtorQual qual name
         else
           Nothing
 
