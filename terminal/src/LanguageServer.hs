@@ -1112,8 +1112,7 @@ findDefinitionForElement state details root path src element =
                         Src.Explicit exposed -> any (\exposed ->
                             case exposed of
                               Src.Lower _ -> False
-                              Src.Upper (A.At _ name_) Src.Private -> name_ == name
-                              Src.Upper _ _ -> True
+                              Src.Upper (A.At _ name_) _ -> name_ == name
                               Src.Operator _ _ -> False
                           )
                           exposed
