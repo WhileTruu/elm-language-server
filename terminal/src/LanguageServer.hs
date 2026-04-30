@@ -1373,7 +1373,7 @@ findDefinitionForTypeInModule name src =
         (\(A.At _ union@(Src.Union (A.At region unionName) _ variants)) acc ->
           if unionName == name
             then Just (A.At region (FoundUnion union))
-            else Nothing
+            else acc
         )
         Nothing
         (Src._unions src)
@@ -1520,6 +1520,14 @@ elementToStr element =
       Name.toChars name ++ " (Var)"
     EVarQual prefix name ->
       Name.toChars prefix ++ "." ++ Name.toChars name ++ " (VarQual)"
+    ECtor name ->
+      Name.toChars name ++ " (Ctor)"
+    ECtorQual prefix name ->
+      Name.toChars prefix ++ "." ++ Name.toChars name ++ " (CtorQual)"
+    EType name ->
+      Name.toChars name ++ " (Type)"
+    ETypeQual prefix name ->
+      Name.toChars prefix ++ "." ++ Name.toChars name ++ " (TypeQual)"
     EAccess _ _ record field ->
       "." ++ Name.toChars field ++ " (Access)"
     EInfix name ->
@@ -1534,6 +1542,14 @@ elementToRenamePlaceholder element =
     EVar _ _ name ->
       Name.toChars name
     EVarQual prefix name ->
+      Name.toChars name
+    ECtor name ->
+      Name.toChars name
+    ECtorQual prefix name ->
+      Name.toChars name
+    EType name ->
+      Name.toChars name
+    ETypeQual prefix name ->
       Name.toChars name
     EAccess _ _ record field ->
       Name.toChars field
