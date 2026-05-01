@@ -124,7 +124,7 @@ runLoop state =
   do  contentLength <- readHeader
       body <- BSLC.hGet IO.stdin (contentLength + 2)
 
-      case Aeson.parseEither (\obj -> obj .: "method") =<< Aeson.eitherDecode body of
+      case Aeson.parseEither (\a -> a .: "method") =<< Aeson.eitherDecode body of
         Left err ->
           do  putStrFlushErr $ "Error decoding JSON: " ++ err
               runLoop state
@@ -141,21 +141,21 @@ handleMessage state method body =
       do  let result =
                 Aeson.parseEither (\obj ->
                   do  params <- obj .: "params"
-                      id <- obj .: "id"
+                      requestID <- obj .: "id"
                       rootPath <- params .: "rootPath" :: Aeson.Parser String
                       initializationOptions <- params Aeson..:? "initializationOptions" :: Aeson.Parser (Maybe Aeson.Object)
 
-                      languageServer <- maybe (pure Nothing) (\obj -> obj Aeson..:? "whiletruu-elm-language-server") initializationOptions
-                      elmFormatPath <- maybe (pure Nothing) (\obj -> obj Aeson..:? "elmFormatPath") languageServer
+                      languageServer <- maybe (pure Nothing) (\a -> a Aeson..:? "whiletruu-elm-language-server") initializationOptions
+                      elmFormatPath <- maybe (pure Nothing) (\a -> a Aeson..:? "elmFormatPath") languageServer
 
-                      return ( id, rootPath, elmFormatPath)
+                      return ( requestID, rootPath, elmFormatPath)
                 ) =<< Aeson.eitherDecode body
 
           case result of
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (id, rootPath, elmFormatPath) ->
+            Right (requestID, rootPath, elmFormatPath) ->
               do  elmFormat <- getElmFormat elmFormatPath
 
                   Control.Concurrent.MVar.modifyMVar_ (_elmFormat state) $
@@ -184,8 +184,7 @@ handleMessage state method body =
                             , "version" .= ("1.0.0" :: String)
                             ]
                           ]
-
-                  respond id response
+                  respond requestID response
 
     "initialized" ->
       return ()
@@ -197,8 +196,8 @@ handleMessage state method body =
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right id ->
-              respond id Aeson.Null
+            Right requestID ->
+              respond requestID Aeson.Null
 
     "exit" ->
       Exit.exitSuccess
@@ -228,9 +227,9 @@ handleMessage state method body =
                     return $ Map.insert filePath (BS_UTF8.fromString text) a
 
                   style <- Reporting.languageServer
-                  result <- diagnostics style state filePath
+                  diagnosticsResult <- diagnostics style state filePath
 
-                  case result of
+                  case diagnosticsResult of
                     Left err ->
                       showMessage MessageTypeError $ Reporting.Exit.toString $
                         diagnosticsExitToReport err
@@ -244,8 +243,8 @@ handleMessage state method body =
                                   return (map (\(a,_,_) -> a) stuffs)
 
                           mapM_
-                            (\(filePath, i, reports) ->
-                              publishReportDiagnostic filePath i reports
+                            (\(reportsFilePath, i, reports) ->
+                              publishReportDiagnostic reportsFilePath i reports
                             )
                             stuffs
 
@@ -271,9 +270,9 @@ handleMessage state method body =
               do  let mVar = _changedFiles state
 
                   style <- Reporting.languageServer
-                  result <- diagnostics style state filePath
+                  diagnosticsResult <- diagnostics style state filePath
 
-                  case result of
+                  case diagnosticsResult of
                     Left err ->
                       showMessage MessageTypeError $ Reporting.Exit.toString $
                         diagnosticsExitToReport err
@@ -286,11 +285,11 @@ handleMessage state method body =
                           mapM_ (\a -> publishReportDiagnostic a 1 []) diff
 
                           Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state)
-                            (\a -> pure (map (\(a,_,_) -> a) stuffs))
+                            (\_ -> pure (map (\(a,_,_) -> a) stuffs))
 
                           mapM_
-                            (\(filePath, i, reports) ->
-                              publishReportDiagnostic filePath i reports
+                            (\(reportsFilePath, i, reports) ->
+                              publishReportDiagnostic reportsFilePath i reports
                             )
                             stuffs
 
@@ -348,7 +347,7 @@ handleMessage state method body =
       do  let result =
                 Aeson.parseEither (\obj ->
                   do  params <- obj .: "params"
-                      id <- obj .: "id" :: Aeson.Parser Int
+                      requestID <- obj .: "id" :: Aeson.Parser Int
 
                       textDocument <- params .: "textDocument"
                       uri <- textDocument .: "uri" :: Aeson.Parser String
@@ -358,34 +357,32 @@ handleMessage state method body =
                       column <- position .: "character" :: Aeson.Parser Int
 
                       let filePath = drop 7 uri
-                      let position = A.Position
-                                       (fromIntegral row + 1)
-                                       (fromIntegral column + 1)
+                      let pos = A.Position (fromIntegral row + 1) (fromIntegral column + 1)
 
-                      return (id, filePath, position)
+                      return (requestID, filePath, pos)
                 ) =<< Aeson.eitherDecode body
 
           case result of
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (id, filePath, position) ->
+            Right (requestID, filePath, position) ->
               do  style <- Reporting.languageServer
-                  result <- findDefinition style state filePath position
+                  definitionResult <- findDefinition style state filePath position
 
-                  case result of
+                  case definitionResult of
                     Right (definitionFilePath, _, _, A.At region _) ->
-                      respond id $ encodeRegion definitionFilePath region
+                      respond requestID $ encodeRegion definitionFilePath region
 
                     Left err ->
-                      respondErr id $ Reporting.Exit.toString $
+                      respondErr requestID $ Reporting.Exit.toString $
                         definitionExitToReport filePath err
 
     "textDocument/references" ->
       do  let result =
                 Aeson.parseEither (\obj ->
                   do  params <- obj .: "params"
-                      id <- obj .: "id" :: Aeson.Parser Int
+                      requestID <- obj .: "id" :: Aeson.Parser Int
 
                       textDocument <- params .: "textDocument"
                       uri <- textDocument .: "uri" :: Aeson.Parser String
@@ -395,38 +392,38 @@ handleMessage state method body =
                       column <- position .: "character" :: Aeson.Parser Int
 
                       let filePath = drop 7 uri
-                      let position = A.Position
+                      let pos = A.Position
                                        (fromIntegral row + 1)
                                        (fromIntegral column + 1)
 
-                      return (id, filePath, position)
+                      return (requestID, filePath, pos)
                 ) =<< Aeson.eitherDecode body
 
           case result of
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (id, filePath, position) ->
+            Right (requestID, filePath, position) ->
               do  style <- Reporting.languageServer
-                  result <- findReferences style state filePath position
+                  referencesResult <- findReferences style state filePath position
 
-                  case result of
+                  case referencesResult of
                     Right references ->
-                      respond id
+                      respond requestID
                         $ Aeson.toJSON
                         $ concatMap (\(fp, regions) ->
                             map (encodeRegion fp) regions
                           ) (Map.toList references)
 
                     Left err ->
-                      respondErr id $ Reporting.Exit.toString $
+                      respondErr requestID $ Reporting.Exit.toString $
                         definitionExitToReport filePath err
 
     "textDocument/prepareRename" ->
       do  let result =
                 Aeson.parseEither (\obj ->
                   do  params <- obj .: "params"
-                      id <- obj .: "id" :: Aeson.Parser Int
+                      requestID <- obj .: "id" :: Aeson.Parser Int
 
                       textDocument <- params .: "textDocument"
                       uri <- textDocument .: "uri" :: Aeson.Parser String
@@ -436,36 +433,36 @@ handleMessage state method body =
                       column <- position .: "character" :: Aeson.Parser Int
 
                       let filePath = drop 7 uri
-                      let position = A.Position
+                      let pos = A.Position
                                        (fromIntegral row + 1)
                                        (fromIntegral column + 1)
 
-                      return (id, filePath, position)
+                      return (requestID, filePath, pos)
                 ) =<< Aeson.eitherDecode body
 
           case result of
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (id, filePath, position) ->
+            Right (requestID, filePath, position) ->
               do  style <- Reporting.languageServer
                   maybeTarget <- findDefinition style state filePath position
                   case maybeTarget of
                     Right (_, _, element, _) ->
-                      do  respond id $
+                      do  respond requestID $
                             Aeson.object
                               [ "range" .= encodeRange (A.toRegion element)
                               , "placeholder" .=  (elementToRenamePlaceholder element :: String)
                               ]
 
                     Left _ ->
-                      respond id Aeson.Null
+                      respond requestID Aeson.Null
 
     "textDocument/rename" ->
       do  let result =
                 Aeson.parseEither (\obj ->
                   do  params <- obj .: "params"
-                      id <- obj .: "id" :: Aeson.Parser Int
+                      requestID <- obj .: "id" :: Aeson.Parser Int
 
                       textDocument <- params .: "textDocument"
                       uri <- textDocument .: "uri" :: Aeson.Parser String
@@ -476,122 +473,120 @@ handleMessage state method body =
                       newName <- params .: "newName" :: Aeson.Parser String
 
                       let filePath = drop 7 uri
-                      let position = A.Position
+                      let pos = A.Position
                                        (fromIntegral row + 1)
                                        (fromIntegral column + 1)
 
-                      return (id, filePath, position, newName)
+                      return (requestID, filePath, pos, newName)
                 ) =<< Aeson.eitherDecode body
 
           case result of
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (id, filePath, position, newName) ->
+            Right (requestID, filePath, pos, newName) ->
               do  style <- Reporting.languageServer
-                  result <- findReferences style state filePath position
+                  referencesResult <- findReferences style state filePath pos
 
-                  case result of
+                  case referencesResult of
                     Right references ->
                       do  let amount = length (concat (Map.elems references))
-                          respond id $ Aeson.toJSON $
+                          respond requestID $ Aeson.toJSON $
                              encodeWorkspaceEdit references (Name.fromChars newName)
 
                     Left err ->
-                      do  respondErr id $ Reporting.Exit.toString $
+                      do  respondErr requestID $ Reporting.Exit.toString $
                             definitionExitToReport filePath err
 
     "textDocument/formatting" ->
       do  let result =
                 Aeson.parseEither (\obj ->
                   do  params <- obj .: "params"
-                      id <- obj .: "id" :: Aeson.Parser Int
+                      requestID <- obj .: "id" :: Aeson.Parser Int
 
                       textDocument <- params .: "textDocument"
                       uri <- textDocument .: "uri" :: Aeson.Parser String
 
                       let filePath = drop 7 uri
 
-                      pure (id, filePath)
+                      pure (requestID, filePath)
                 ) =<< Aeson.eitherDecode body
 
           case result of
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (id, filePath) ->
+            Right (requestID, filePath) ->
               do  elmFormat <- Control.Concurrent.MVar.readMVar (_elmFormat state)
 
                   case elmFormat of
                     Nothing ->
-                      do  respondErr id "elm-format not found"
+                      do  respondErr requestID "elm-format not found"
 
                     Just executable ->
                       do  files <- Control.Concurrent.MVar.readMVar (_changedFiles state)
                           source <- maybe (File.readUtf8 filePath) return $ Map.lookup filePath files
 
-                          result <-
+                          formattingResult <-
                             Exception.try $
                               Proc.readCreateProcessWithExitCode (Proc.proc executable ["--stdin"]) (BS_UTF8.toString source)
                               :: IO (Either IOError (Exit.ExitCode, String, String))
 
-                          case result of
+                          case formattingResult of
                             Left _ ->
-                              do  respondErr id $ "Failed to run elm-format: " ++ executable
+                              respondErr requestID $ "Failed to run elm-format: " ++ executable
 
                             Right (Exit.ExitFailure _, _, stderr_ )->
-                              do  respondErr id stderr_
+                              respondErr requestID stderr_
 
                             Right (Exit.ExitSuccess, stdout_, _)->
-                              let
-                                lines = BSC.split '\n' source
-                              in
-                              do  respond id $ Aeson.toJSON
-                                    [ Aeson.object
-                                        [ "range" .= Aeson.object
-                                          [ "start" .= Aeson.object
-                                              [ "line" .= (0 :: Int)
-                                              , "character" .= (0 :: Int)
-                                              ]
-                                          , "end" .= Aeson.object
-                                              [ "line" .= max 0 (length lines - 1)
-                                              , "character" .= case reverse lines of
-                                                                 last : _ -> BSC.length last
-                                                                 [] -> 0
-                                              ]
+                              let srcLines = BSC.split '\n' source in
+                              respond requestID $ Aeson.toJSON
+                                [ Aeson.object
+                                    [ "range" .= Aeson.object
+                                      [ "start" .= Aeson.object
+                                          [ "line" .= (0 :: Int)
+                                          , "character" .= (0 :: Int)
                                           ]
-                                        , "newText" .= stdout_
-                                        ]
+                                      , "end" .= Aeson.object
+                                          [ "line" .= max 0 (length srcLines - 1)
+                                          , "character" .= case reverse srcLines of
+                                                             a : _ -> BSC.length a
+                                                             [] -> 0
+                                          ]
+                                      ]
+                                    , "newText" .= stdout_
                                     ]
+                                ]
 
     "textDocument/documentSymbol" ->
       do  let result =
                 Aeson.parseEither (\obj ->
                   do  params <- obj .: "params"
-                      id <- obj .: "id" :: Aeson.Parser Int
+                      requestID <- obj .: "id" :: Aeson.Parser Int
 
                       textDocument <- params .: "textDocument"
                       uri <- textDocument .: "uri" :: Aeson.Parser String
 
                       let filePath = drop 7 uri
 
-                      return (id, filePath)
+                      return (requestID, filePath)
                 ) =<< Aeson.eitherDecode body
 
           case result of
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (id, filePath) ->
+            Right (requestID, filePath) ->
               do  style <- Reporting.languageServer
-                  result <- getSymbols style state filePath
+                  symbolsResult <- getSymbols style state filePath
 
-                  case result of
+                  case symbolsResult of
                     Right symbols ->
-                      respond id $ Aeson.toJSON $ map symbolInfoToJson symbols
+                      respond requestID $ Aeson.toJSON $ map symbolInfoToJson symbols
 
                     Left err ->
-                      respondErr id $ Reporting.Exit.toString $
+                      respondErr requestID $ Reporting.Exit.toString $
                         definitionExitToReport filePath err
 
     unknownMethod ->
@@ -900,8 +895,8 @@ definitionExitToReport path exit =
     DefinitionExitBadDetails details ->
       Reporting.Exit.toDetailsReport details
 
-    DefinitionExitBadInput source error ->
-      Reporting.Exit.Help.compilerReport "/" (Reporting.Error.Module "???" path File.zeroTime source error) []
+    DefinitionExitBadInput source error_ ->
+      Reporting.Exit.Help.compilerReport "/" (Reporting.Error.Module "???" path File.zeroTime source error_) []
 
     DefinitionExitNoRoot ->
       Reporting.Exit.Help.report "DEFINITION FOR WHAT?" Nothing
@@ -928,9 +923,9 @@ definitionExitToReport path exit =
         ("I tried to find the file for " ++ ModuleName.toChars moduleName ++ ", but failed to find it in " ++ root ++ ".")
         []
 
-    DefinitionExitNoFile path ->
+    DefinitionExitNoFile path1 ->
       Reporting.Exit.Help.report "NO FILE" Nothing
-        ("I tried to load a file from " ++ path ++ ", but it does not exist.")
+        ("I tried to load a file from " ++ path1 ++ ", but it does not exist.")
         [ Reporting.Doc.reflow $
             "This often happens when there's nothing in the `~/.elm` folder.\
             \ You can try deleting the `elm-stuff` folder and running `elm make`\
@@ -1047,16 +1042,16 @@ findDefinitionForElement state details root path src element =
             return $
               case (local, external) of
                 (Just a, _) -> Right (path, src, a)
-                (Nothing, Right (Just a)) -> Right $ (\(a, b, c) -> (a, b, fmap FoundValue c)) a
+                (Nothing, Right (Just a)) -> Right $ (\(a1, b1, c1) -> (a1, b1, fmap FoundValue c1)) a
                 (Nothing, Left a) -> Left a
                 (Nothing, Right Nothing) -> Left (DefinitionExitNotFound element)
 
-      EVarQual mod name ->
+      EVarQual prefix name ->
        fmap
          (\a -> a
-           >>= fmap (\(a, b, c) -> (a, b, fmap FoundValue c)) . maybe (Left (DefinitionExitNotFound element)) Right
+           >>= fmap (\(a1, b1, c1) -> (a1, b1, fmap FoundValue c1)) . maybe (Left (DefinitionExitNotFound element)) Right
          )
-         (findDefinitionForLowVarQualInImports state details root (Src._imports src) mod name)
+         (findDefinitionForLowVarQualInImports state details root (Src._imports src) prefix name)
 
       ECtor name ->
         do  let local = findDefinitionForCtorInModule name src
@@ -1065,14 +1060,14 @@ findDefinitionForElement state details root path src element =
                     (\import_@(Src.Import iName iAlias iExposing) ->
                       case iExposing of
                         Src.Open -> True
-                        Src.Explicit exposed -> any (\exposed ->
+                        Src.Explicit exposedList -> any (\exposed ->
                             case exposed of
                               Src.Lower _ -> False
                               Src.Upper (A.At _ name_) Src.Private -> name_ == name
                               Src.Upper _ _ -> True
                               Src.Operator _ _ -> False
                           )
-                          exposed
+                          exposedList
                     )
                     (Src._imports src)
             external <- findDefinitionInImports state details root potentialSources $
@@ -1109,13 +1104,13 @@ findDefinitionForElement state details root path src element =
                     (\import_@(Src.Import iName iAlias iExposing) ->
                       case iExposing of
                         Src.Open -> True
-                        Src.Explicit exposed -> any (\exposed ->
+                        Src.Explicit exposedList -> any (\exposed ->
                             case exposed of
                               Src.Lower _ -> False
                               Src.Upper (A.At _ name_) _ -> name_ == name
                               Src.Operator _ _ -> False
                           )
-                          exposed
+                          exposedList
                     )
                     (Src._imports src)
             external <- findDefinitionInImports state details root potentialSources $
@@ -1151,14 +1146,14 @@ findDefinitionForElement state details root path src element =
       EInfix name_ ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, fmap FoundInfix c)) . maybe (Left (DefinitionExitNotFound element)) Right
+            >>= fmap (\(a1, b1, c1) -> (a1, b1, fmap FoundInfix c1)) . maybe (Left (DefinitionExitNotFound element)) Right
           )
           (findDefinitionForInfixInImports state details root (Src._imports src) name_)
 
       EModuleName name_ ->
         fmap
           (\a -> a
-            >>= fmap (\(a, b, c) -> (a, b, fmap FoundModuleName c)) . maybe (Left (DefinitionExitNotFound element)) Right
+            >>= fmap (\(a1, b1, c1) -> (a1, b1, fmap FoundModuleName c1)) . maybe (Left (DefinitionExitNotFound element)) Right
           )
           (findDefinitionForModuleName state details root name_)
 
@@ -1241,7 +1236,7 @@ findDefinitionForLowVarQualInImports state details root imports qual name =
           y <- acc
 
           case (y, x) of
-            (Left _, x) -> return x
+            (Left _, _) -> return x
             (Right Nothing, _) -> return x
             (Right (Just _), _) -> return y
     )
@@ -1263,13 +1258,13 @@ findDefinitionForLowVarInImports state details root imports name =
         (\import_@(Src.Import iName iAlias iExposing) ->
           case iExposing of
             Src.Open -> True
-            Src.Explicit exposed -> any (\exposed ->
+            Src.Explicit exposedList -> any (\exposed ->
                 case exposed of
                   Src.Lower (A.At _ name_) -> name_ == name
                   Src.Upper _ _ -> False
                   Src.Operator _ _ -> False
               )
-              exposed
+              exposedList
         )
         imports
   in
@@ -1279,7 +1274,7 @@ findDefinitionForLowVarInImports state details root imports name =
           y <- acc
 
           case (y, x) of
-            (Left _, x) -> return x
+            (Left _, _) -> return x
             (Right Nothing, _) -> return x
             (Right (Just _), _) -> return y
     )
@@ -1301,7 +1296,7 @@ findDefinitionInImports state details root imports find =
           y <- acc
 
           case (y, x) of
-            (Left _, x) -> return x
+            (Left _, _) -> return x
             (Right Nothing, _) -> return x
             (Right (Just _), _) -> return y
     )
@@ -1394,13 +1389,13 @@ findDefinitionForInfixInImports state details root imports name =
         (\import_@(Src.Import iName iAlias iExposing) ->
           case iExposing of
             Src.Open -> True
-            Src.Explicit exposed -> any (\exposed ->
+            Src.Explicit exposedList -> any (\exposed ->
                 case exposed of
                   Src.Lower _ -> False
                   Src.Upper _ _ -> False
                   Src.Operator _ name_ -> name_ == name
               )
-              exposed
+              exposedList
         )
         imports
   in
@@ -1599,14 +1594,14 @@ findElementInAliases :: A.Position -> [A.Located Src.Alias] -> Maybe Element
 findElementInAliases pos aliases =
   foldr
     (\(A.At region (Src.Alias name _ type_)) found ->
-      let a =
+      let inName =
             if isInRegion pos (A.toRegion name)
               then Just (A.At (A.toRegion name) (EType (A.toValue name)))
               else Nothing
 
-          b = findElementInType pos type_
+          inType = findElementInType pos type_
       in
-      a <|> b <|> found
+      inName <|> inType <|> found
     )
     Nothing
     aliases
@@ -1616,12 +1611,12 @@ findElementInUnions :: A.Position -> [A.Located Src.Union] -> Maybe Element
 findElementInUnions pos unions =
   foldr
     (\(A.At region (Src.Union name _ variants)) found ->
-      let a =
+      let inName =
             if isInRegion pos (A.toRegion name)
               then Just (A.At (A.toRegion name) (EType (A.toValue name)))
               else Nothing
 
-          b =
+          inVariants =
             foldr
               (\(name_, types) found_ ->
                 let a_ =
@@ -1638,7 +1633,7 @@ findElementInUnions pos unions =
               Nothing
               variants
       in
-      a <|> b <|> found
+      inName <|> inVariants <|> found
     )
     Nothing
     unions
@@ -1647,21 +1642,21 @@ findElementInUnions pos unions =
 findElementInImports :: A.Position -> [Src.Import] -> Maybe Element
 findElementInImports pos imports =
   foldr
-    (\(Src.Import name alias exposing) found ->
-      let a =
-            if isInRegion pos (A.toRegion name)
-              then Just (A.At (A.toRegion name) (EModuleName (A.toValue name)))
+    (\(Src.Import iName alias exposing) found ->
+      let inNameOrAlias =
+            if isInRegion pos (A.toRegion iName)
+              then Just (A.At (A.toRegion iName) (EModuleName (A.toValue iName)))
               else
                 maybe
                   Nothing
                     (\a ->
                       if isInRegion pos (A.toRegion a)
-                        then Just (A.At (A.toRegion name) (EModuleName (A.toValue name)))
+                        then Just (A.At (A.toRegion iName) (EModuleName (A.toValue iName)))
                         else Nothing
                     )
                     alias
 
-          b =
+          inExposing =
             case exposing of
               Src.Open ->
                 Nothing
@@ -1688,7 +1683,7 @@ findElementInImports pos imports =
                   Nothing
                   exposed
       in
-      a <|> b <|> found
+      inNameOrAlias <|> inExposing <|> found
     )
     Nothing
     imports
@@ -1699,7 +1694,7 @@ findElementInValues pos values =
   foldr
     (\located found ->
       case located of
-        A.At region (Src.Value name patterns body type_) ->
+        A.At valueRegion (Src.Value name patterns body type_) ->
           let inPatterns =
                   List.foldr
                     (\pattern@(A.At region _) acc ->
@@ -1714,7 +1709,7 @@ findElementInValues pos values =
               a =
                 if isPositionOnValueName pos located
                   then Just (A.At (A.toRegion name) (EVar [] [] (A.toValue name)))
-                else if isInRegion pos region
+                else if isInRegion pos valueRegion
                   then findElementInExpr pos [] patterns body
                 else Nothing
 
@@ -1753,8 +1748,8 @@ findElementInType pos type_ =
         Src.TUnit ->
           Nothing
 
-        Src.TTuple a b rest ->
-            foldr (\a acc -> findElementInType pos a <|> acc) Nothing (a : b : rest)
+        Src.TTuple a b cs ->
+            foldr (\x acc -> findElementInType pos x <|> acc) Nothing (a : b : cs)
 
     else
       Nothing
@@ -1783,8 +1778,8 @@ findElementInExpr
   -> [Src.Pattern]
   -> Src.Expr
   -> Maybe Element
-findElementInExpr position defs patterns expr@(A.At region _) =
-  case A.toValue expr of
+findElementInExpr position defs patterns rootExpr =
+  case A.toValue rootExpr of
     Src.Chr _ ->
       Nothing
 
@@ -1799,13 +1794,13 @@ findElementInExpr position defs patterns expr@(A.At region _) =
 
     Src.Var varType name ->
       case varType of
-        Src.LowVar -> Just $ A.At region $ EVar defs patterns name
-        Src.CapVar -> Just $ A.At region $ ECtor name
+        Src.LowVar -> Just $ A.At (A.toRegion rootExpr) $ EVar defs patterns name
+        Src.CapVar -> Just $ A.At (A.toRegion rootExpr) $ ECtor name
 
     Src.VarQual varType prefix name ->
       case varType of
-        Src.LowVar -> Just $ A.At region $ EVarQual prefix name
-        Src.CapVar -> Just $ A.At region $ ECtorQual prefix name
+        Src.LowVar -> Just $ A.At (A.toRegion rootExpr) $ EVarQual prefix name
+        Src.CapVar -> Just $ A.At (A.toRegion rootExpr) $ ECtorQual prefix name
 
     Src.List exprs ->
       foldr
@@ -1819,7 +1814,7 @@ findElementInExpr position defs patterns expr@(A.At region _) =
         exprs
 
     Src.Op name ->
-      Just $ A.At region $ EInfix name
+      Just $ A.At (A.toRegion rootExpr) $ EInfix name
 
     Src.Negate expr ->
       if isInRegion position (A.toRegion expr) then
@@ -1893,7 +1888,7 @@ findElementInExpr position defs patterns expr@(A.At region _) =
       else
         foldr
           (\def acc ->
-              case (A.toValue def) of
+              case A.toValue def of
                 Src.Define _ patterns1 expr type_ ->
                   let
                       inPatterns =
@@ -2007,20 +2002,20 @@ findElementInPattern
   -> [Src.Pattern]
   -> Src.Pattern
   -> Maybe Element
-findElementInPattern pos defs patterns pattern_ =
-  case A.toValue pattern_ of
+findElementInPattern pos rootDefs rootPatterns rootPattern =
+  case A.toValue rootPattern of
     Src.PAnything ->
       Nothing
 
     Src.PVar name ->
-      Just $ A.At (A.toRegion pattern_) $
-        EVar defs patterns name
+      Just $ A.At (A.toRegion rootPattern) $
+        EVar rootDefs rootPatterns name
 
     Src.PRecord names ->
       List.foldr
         (\(A.At region name) acc ->
           if isInRegion pos region then
-            Just $ A.At region $ EVar defs patterns name
+            Just $ A.At region $ EVar rootDefs rootPatterns name
           else
             acc
         )
@@ -2029,9 +2024,9 @@ findElementInPattern pos defs patterns pattern_ =
 
     Src.PAlias pattern (A.At region alias) ->
       if isInRegion pos region then
-        Just $ A.At region $ EVar defs patterns alias
+        Just $ A.At region $ EVar rootDefs rootPatterns alias
       else
-        findElementInPattern pos defs patterns pattern
+        findElementInPattern pos rootDefs rootPatterns pattern
 
     Src.PUnit ->
       Nothing
@@ -2040,7 +2035,7 @@ findElementInPattern pos defs patterns pattern_ =
       List.foldr
         (\pattern@(A.At region _) acc ->
           if isInRegion pos region then
-            findElementInPattern pos defs patterns pattern
+            findElementInPattern pos rootDefs rootPatterns pattern
           else
             acc
         )
@@ -2051,9 +2046,9 @@ findElementInPattern pos defs patterns pattern_ =
       let
         maybeElement =
           List.foldr
-            (\pattern@(A.At region _) acc ->
-              if isInRegion pos region then
-                findElementInPattern pos defs patterns pattern
+            (\pattern acc ->
+              if isInRegion pos (A.toRegion pattern) then
+                findElementInPattern pos rootDefs rootPatterns pattern
               else
                 acc
             )
@@ -2071,9 +2066,9 @@ findElementInPattern pos defs patterns pattern_ =
       let
         maybeElement =
           List.foldr
-            (\pattern@(A.At region _) acc ->
-              if isInRegion pos region then
-                findElementInPattern pos defs patterns pattern
+            (\pattern acc ->
+              if isInRegion pos (A.toRegion pattern) then
+                findElementInPattern pos rootDefs rootPatterns pattern
               else
                 acc
             )
@@ -2086,20 +2081,20 @@ findElementInPattern pos defs patterns pattern_ =
         else
           Nothing
 
-    Src.PList patterns ->
+    Src.PList patternList ->
         List.foldr
-          (\pattern@(A.At region _) acc ->
-            if isInRegion pos region then
-              findElementInPattern pos defs patterns pattern
+          (\pattern acc ->
+            if isInRegion pos (A.toRegion pattern) then
+              findElementInPattern pos rootDefs rootPatterns pattern
             else
               acc
           )
           Nothing
-          patterns
+          patternList
 
     Src.PCons a b ->
-      findElementInPattern pos defs patterns a <|>
-        findElementInPattern pos defs patterns b
+      findElementInPattern pos rootDefs rootPatterns a <|>
+        findElementInPattern pos rootDefs rootPatterns b
 
     Src.PChr _ ->
       Nothing
@@ -2201,7 +2196,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
                       let
                         maybeImport =
                           List.find
-                            (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
+                            (\import_ -> A.toValue (Src._import import_) == Src.getName defSrc)
                             (Src._imports src)
 
                         imported =
@@ -2250,7 +2245,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
                       let
                         maybeImport =
                           List.find
-                            (\a -> A.toValue (Src._import a) == (Src.getName defSrc))
+                            (\import_ -> A.toValue (Src._import import_) == Src.getName defSrc)
                             (Src._imports src)
 
                         imported =
@@ -2322,8 +2317,13 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
 
                     Right (path, src) ->
                       let
+                        maybeImport =
+                            List.find
+                              (\import_ -> A.toValue (Src._import import_) == Src.getName defSrc)
+                              (Src._imports src)
+
                         imported =
-                          case List.find (\a -> A.toValue (Src._import a) == Src.getName defSrc) (Src._imports src) of
+                          case maybeImport of
                             Just import_@(Src.Import _ alias _) ->
                               if isInfixExposed import_ name then
                                 infixInModule name src
@@ -2582,156 +2582,143 @@ findNameInExposed name exposed =
 
 
 varInExpr :: Name -> [A.Region] -> Src.Expr -> [A.Region]
-varInExpr name foundRegions (A.At region expr_) =
-    case expr_ of
-        Src.Chr _ -> foundRegions
-        Src.Str _ -> foundRegions
-        Src.Int _ -> foundRegions
-        Src.Float _ -> foundRegions
-        Src.Var _ varName -> if varName == name then region : foundRegions else foundRegions
-        Src.VarQual _ qual varName -> foundRegions
-        Src.List exprs -> List.foldl (varInExpr name) foundRegions exprs
-        Src.Op _ -> foundRegions
-        Src.Negate expr -> varInExpr name foundRegions expr
-        Src.Binops exprsAndNames expr ->
-          List.foldl
-            (\foundRegions (expr_, _) -> varInExpr name foundRegions expr_)
-            (varInExpr name foundRegions expr)
-            exprsAndNames
-        Src.Lambda patterns expr ->
-          if any (Maybe.isJust . findDefinitionForNameInPattern name) patterns
-            then foundRegions
-            else varInExpr name foundRegions expr
-        Src.Call expr exprs ->
-          List.foldl
-            (varInExpr name)
-            (varInExpr name foundRegions expr)
-            exprs
-        Src.If listTupleExprs expr ->
-          List.foldl
-            (\foundRegions (one, two) ->
-              varInExpr name (varInExpr name foundRegions one) two
+varInExpr name regions rootExpr =
+  case A.toValue rootExpr of
+    Src.Chr _   -> regions
+    Src.Str _   -> regions
+    Src.Int _   -> regions
+    Src.Float _ -> regions
+
+    Src.Var _ varName ->
+      if varName == name then A.toRegion rootExpr : regions else regions
+
+    Src.VarQual _ _ _ -> regions
+    Src.List exprs    -> List.foldl (varInExpr name) regions exprs
+    Src.Op _          -> regions
+    Src.Negate expr   -> varInExpr name regions expr
+
+    Src.Binops exprsAndNames expr ->
+      List.foldl (\a (expr_, _) -> varInExpr name a expr_)
+        (varInExpr name regions expr)
+        exprsAndNames
+
+    Src.Lambda patterns expr ->
+      if any (Maybe.isJust . findDefinitionForNameInPattern name) patterns
+        then regions
+        else varInExpr name regions expr
+
+    Src.Call func args -> List.foldl (varInExpr name) (varInExpr name regions func) args
+
+    Src.If listTupleExprs expr ->
+      List.foldl
+        (\a (one, two) ->
+          varInExpr name (varInExpr name a one) two
+        )
+        (varInExpr name regions expr)
+        listTupleExprs
+
+    Src.Let defs expr ->
+      let
+        isNameInDefs =
+          any
+            (\a ->
+              case A.toValue a of
+                Src.Define (A.At _ name_) _ _ _ -> name == name_
+                Src.Destruct pattern _ ->
+                  Maybe.isJust (findDefinitionForNameInPattern name pattern)
             )
-            (varInExpr name foundRegions expr)
-            listTupleExprs
-        Src.Let defs expr ->
-          let
-            isNameInDefs =
-              any
-                (\a ->
-                  case A.toValue a of
-                    Src.Define (A.At _ name_) _ _ _ -> name == name_
-                    Src.Destruct pattern _ ->
-                      Maybe.isJust (findDefinitionForNameInPattern name pattern)
-                )
-              defs
-          in
-          if isNameInDefs then
-            foundRegions
-          else
-            List.foldl
-              (\foundRegions (A.At _ def_) ->
-                case def_ of
-                  Src.Define (A.At _ name_) _ expr_ _ -> varInExpr name foundRegions expr_
-                  Src.Destruct pattern expr_ -> varInExpr name foundRegions expr_
-              )
-              (varInExpr name foundRegions expr)
-              defs
-        Src.Case expr branches ->
-          if any (Maybe.isJust . findDefinitionForNameInPattern name . fst) branches
-            then foundRegions
-            else List.foldl
-              (\foundRegions (pattern, branchExpr) ->
-                varInExpr name (varInExpr name foundRegions branchExpr) expr
-              )
-              (varInExpr name foundRegions expr)
-              branches
-        Src.Accessor _ -> foundRegions
-        Src.Access expr _ -> varInExpr name foundRegions expr
-        Src.Update _ fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> varInExpr name foundRegions fieldExpr)
-                foundRegions
-                fields
-        Src.Record fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> varInExpr name foundRegions fieldExpr)
-                foundRegions
-                fields
-        Src.Unit -> foundRegions
-        Src.Tuple exprA exprB exprs ->
-            List.foldl (varInExpr name)
-                foundRegions
-                (exprA : exprB : exprs)
-        Src.Shader _ _ -> foundRegions
+          defs
+      in
+      if isNameInDefs then
+        regions
+      else
+        List.foldl
+          (\a (A.At _ def_) ->
+            case def_ of
+              Src.Define (A.At _ name_) _ expr_ _ -> varInExpr name a expr_
+              Src.Destruct pattern expr_ -> varInExpr name a expr_
+          )
+          (varInExpr name regions expr)
+          defs
+
+    Src.Case expr branches ->
+      if any (Maybe.isJust . findDefinitionForNameInPattern name . fst) branches
+        then regions
+        else List.foldl
+          (\a (_, x) ->
+            varInExpr name (varInExpr name a x) expr
+          )
+          (varInExpr name regions expr)
+          branches
+
+    Src.Accessor _      -> regions
+    Src.Access expr _   -> varInExpr name regions expr
+    Src.Update _ fields -> List.foldl (\a (_, x) -> varInExpr name a x) regions fields
+    Src.Record fields   -> List.foldl (\a (_, x) -> varInExpr name a x) regions fields
+    Src.Unit            -> regions
+    Src.Tuple a b cs    -> List.foldl (varInExpr name) regions (a : b : cs)
+    Src.Shader _ _      -> regions
 
 
 varQualInExpr :: Name -> Name -> [A.Region] -> Src.Expr -> [A.Region]
-varQualInExpr qual name foundRegions (A.At region expr_) =
-    case expr_ of
-        Src.Chr _ -> foundRegions
-        Src.Str _ -> foundRegions
-        Src.Int _ -> foundRegions
-        Src.Float _ -> foundRegions
-        Src.Var _ varName -> foundRegions
-        Src.VarQual _ qual_ varName ->
-          if qual == qual_ && varName == name then region : foundRegions else foundRegions
-        Src.List exprs -> List.foldl (varQualInExpr qual name) foundRegions exprs
-        Src.Op _ -> foundRegions
-        Src.Negate expr -> varQualInExpr qual name foundRegions expr
-        Src.Binops exprsAndNames expr ->
-            List.foldl
-                (\foundRegions (expr_, _) -> varQualInExpr qual name foundRegions expr_)
-                (varQualInExpr qual name foundRegions expr)
-                exprsAndNames
-        Src.Lambda patterns expr -> varQualInExpr qual name foundRegions expr
-        Src.Call expr exprs ->
-            List.foldl
-                (varQualInExpr qual name)
-                (varQualInExpr qual name foundRegions expr)
-                exprs
-        Src.If listTupleExprs expr ->
-            List.foldl
-                (\foundRegions (one, two) ->
-                    varQualInExpr qual name (varQualInExpr qual name foundRegions one) two
-                )
-                (varQualInExpr qual name foundRegions expr)
-                listTupleExprs
-        Src.Let defs expr ->
-            List.foldl
-                (\foundRegions (A.At _ def_) ->
-                    case def_ of
-                        Src.Define (A.At _ name_) _ expr_ _ ->
-                            varQualInExpr qual name foundRegions expr_
+varQualInExpr p n rs (A.At r e) =
+  case e of
+    Src.Chr _                 -> rs
+    Src.Str _                 -> rs
+    Src.Int _                 -> rs
+    Src.Float _               -> rs
+    Src.Var _ varName         -> rs
+    Src.VarQual _ prefix name -> if prefix == p && name == n then r : rs else rs
+    Src.List exprs            -> List.foldl (varQualInExpr p n) rs exprs
+    Src.Op _                  -> rs
+    Src.Negate expr           -> varQualInExpr p n rs expr
 
-                        Src.Destruct pattern expr_ ->
-                            varQualInExpr qual name foundRegions expr_
-                )
-                (varQualInExpr qual name foundRegions expr)
-                defs
-        Src.Case expr branches ->
-            List.foldl
-                (\foundRegions (pattern, branchExpr) ->
-                    varQualInExpr qual name foundRegions branchExpr
-                )
-                (varQualInExpr qual name foundRegions expr)
-                branches
-        Src.Accessor _ -> foundRegions
-        Src.Access expr _ -> varQualInExpr qual name foundRegions expr
-        Src.Update _ fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> varQualInExpr qual name foundRegions fieldExpr)
-                foundRegions
-                fields
-        Src.Record fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> varQualInExpr qual name foundRegions fieldExpr)
-                foundRegions
-                fields
-        Src.Unit -> foundRegions
-        Src.Tuple exprA exprB exprs ->
-            List.foldl (varQualInExpr qual name) foundRegions (exprA : exprB : exprs)
-        Src.Shader _ _ -> foundRegions
+    Src.Binops ops final ->
+      List.foldl (\a (op, _) -> varQualInExpr p n a op)
+        (varQualInExpr p n rs final)
+        ops
+
+    Src.Lambda _ body  -> varQualInExpr p n rs body
+    Src.Call func args -> List.foldl (varQualInExpr p n) (varQualInExpr p n rs func) args
+
+    Src.If branches finally ->
+      List.foldl
+        (\rs1 (condition, branch) ->
+            varQualInExpr p n (varQualInExpr p n rs1 condition) branch
+        )
+        (varQualInExpr p n rs finally)
+        branches
+
+    Src.Let defs expr ->
+      List.foldl
+        (\rs1 (A.At _ def_) ->
+          case def_ of
+            Src.Define _ _ body _ -> varQualInExpr p n rs1 body
+            Src.Destruct _ body   -> varQualInExpr p n rs1 body
+        )
+        (varQualInExpr p n rs expr)
+        defs
+
+    Src.Case expr branches ->
+      List.foldl (\rs1 (_, expr1) -> varQualInExpr p n rs1 expr1 )
+        (varQualInExpr p n rs expr)
+        branches
+
+    Src.Accessor _      -> rs
+    Src.Access record _ -> varQualInExpr p n rs record
+
+    Src.Update _ fields ->
+      List.foldl
+        (\rs1 (_, field) -> varQualInExpr p n rs1 field)
+        rs
+        fields
+
+    Src.Record fields ->
+        List.foldl (\rs1 (_, field) -> varQualInExpr p n rs field) rs fields
+
+    Src.Unit         -> rs
+    Src.Tuple a b cs -> List.foldl (varQualInExpr p n) rs (a : b : cs)
+    Src.Shader _ _   -> rs
 
 
 infixInModule :: Name -> Src.Module -> [A.Region]
@@ -2744,73 +2731,69 @@ infixInModule name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
 
 
 infixInExpr :: Name -> [A.Region] -> Src.Expr -> [A.Region]
-infixInExpr name foundRegions (A.At region expr_) =
-    case expr_ of
-        Src.Chr _ -> foundRegions
-        Src.Str _ -> foundRegions
-        Src.Int _ -> foundRegions
-        Src.Float _ -> foundRegions
-        Src.Var _ _ -> foundRegions
-        Src.VarQual _ _ _ -> foundRegions
-        Src.List exprs -> List.foldl (infixInExpr name) foundRegions exprs
-        Src.Op opName -> if opName == name then region : foundRegions else foundRegions
-        Src.Negate expr -> infixInExpr  name foundRegions expr
-        Src.Binops exprsAndNames expr ->
-            List.foldl
-                (\foundRegions (expr_, (A.At region name_)) ->
-                  if name == name_ then
-                    infixInExpr name (region : foundRegions) expr_
-                  else
-                    infixInExpr name foundRegions expr_
-                )
-                (infixInExpr name foundRegions expr)
-                exprsAndNames
-        Src.Lambda patterns expr -> infixInExpr name foundRegions expr
-        Src.Call expr exprs -> List.foldl (infixInExpr name) (infixInExpr name foundRegions expr) exprs
-        Src.If listTupleExprs expr ->
-            List.foldl
-                (\foundRegions (one, two) ->
-                    infixInExpr name (infixInExpr name foundRegions one) two
-                )
-                (infixInExpr name foundRegions expr)
-                listTupleExprs
-        Src.Let defs expr ->
-            List.foldl
-                (\foundRegions (A.At _ def_) ->
-                    case def_ of
-                        Src.Define (A.At _ name_) _ expr_ _ ->
-                            infixInExpr name foundRegions expr_
+infixInExpr n rs (A.At r e) =
+  case e of
+    Src.Chr _         -> rs
+    Src.Str _         -> rs
+    Src.Int _         -> rs
+    Src.Float _       -> rs
+    Src.Var _ _       -> rs
+    Src.VarQual _ _ _ -> rs
+    Src.List exprs    -> List.foldl (infixInExpr n) rs exprs
+    Src.Op opName     -> if opName == n then r : rs else rs
+    Src.Negate expr   -> infixInExpr  n rs expr
 
-                        Src.Destruct pattern expr_ ->
-                            infixInExpr name foundRegions expr_
-                )
-                (infixInExpr name foundRegions expr)
-                defs
-        Src.Case expr branches ->
-            List.foldl
-                (\foundRegions (pattern, branchExpr) ->
-                    infixInExpr name (infixInExpr name foundRegions branchExpr) expr
-                )
-                (infixInExpr name foundRegions expr)
-                branches
-        Src.Accessor _ -> foundRegions
-        Src.Access expr _ -> infixInExpr name foundRegions expr
-        Src.Update _ fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> infixInExpr name foundRegions fieldExpr)
-                foundRegions
-                fields
-        Src.Record fields ->
-            List.foldl
-                (\foundRegions (_, fieldExpr) -> infixInExpr name foundRegions fieldExpr)
-                foundRegions
-                fields
-        Src.Unit -> foundRegions
-        Src.Tuple exprA exprB exprs ->
-            List.foldl (infixInExpr name)
-                foundRegions
-                (exprA : exprB : exprs)
-        Src.Shader _ _ -> foundRegions
+    Src.Binops exprsAndNames expr ->
+      List.foldl
+        (\rs1 (expr_, A.At region name) ->
+          if n == name then
+            infixInExpr n (region : rs1) expr_
+          else
+            infixInExpr n rs1 expr_
+        )
+        (infixInExpr n rs expr)
+        exprsAndNames
+
+    Src.Lambda patterns expr -> infixInExpr n rs expr
+
+    Src.Call expr exprs ->
+      List.foldl (infixInExpr n) (infixInExpr n rs expr) exprs
+
+    Src.If branches finally ->
+      List.foldl
+        (\rs1 (one, two) ->
+          infixInExpr n (infixInExpr n rs1 one) two
+        )
+        (infixInExpr n rs finally)
+        branches
+
+    Src.Let defs expr ->
+      List.foldl
+        (\rs1 (A.At _ def_) ->
+          case def_ of
+            Src.Define (A.At _ name_) _ expr_ _ -> infixInExpr n rs1 expr_
+            Src.Destruct pattern expr_ -> infixInExpr n rs1 expr_
+        )
+        (infixInExpr n rs expr)
+        defs
+
+    Src.Case expr branches ->
+      List.foldl (\rs1 (_, expr1) -> infixInExpr n (infixInExpr n rs1 expr1) expr)
+        (infixInExpr n rs expr)
+        branches
+
+    Src.Accessor _      -> rs
+    Src.Access record _ -> infixInExpr n rs record
+
+    Src.Update _ fields ->
+      List.foldl (\rs1 (_, field) -> infixInExpr n rs1 field) rs fields
+
+    Src.Record fields ->
+      List.foldl (\rs1 (_, field) -> infixInExpr n rs1 field) rs fields
+
+    Src.Unit         -> rs
+    Src.Tuple a b cs -> List.foldl (infixInExpr n) rs (a : b : cs)
+    Src.Shader _ _   -> rs
 
 
 findQualNameInModuleTypes :: ModuleName.Raw -> Name -> Src.Module -> [A.Region]
@@ -2835,33 +2818,33 @@ findQualNameInModuleTypes qual name src =
 
 
 findQualNameInType :: ModuleName.Raw -> Name -> Src.Type_ -> [A.Region]
-findQualNameInType qual name tipe =
+findQualNameInType p n tipe =
   case tipe of
     Src.TLambda arg ret ->
-      findQualNameInType qual name (A.toValue arg) ++ findQualNameInType qual name (A.toValue ret)
+      findQualNameInType p n (A.toValue arg) ++ findQualNameInType p n (A.toValue ret)
 
     Src.TVar name ->
       []
 
     Src.TType region _ tlist ->
-      concatMap (findQualNameInType qual name . A.toValue) tlist
+      concatMap (findQualNameInType p n . A.toValue) tlist
 
-    Src.TTypeQual region qual_ name_ tlist ->
-      if qual_ == qual && name == name_ then
-        region : concatMap (findQualNameInType qual name . A.toValue) tlist
+    Src.TTypeQual region prefix name tlist ->
+      if prefix == p && name == n then
+        region : concatMap (findQualNameInType p n . A.toValue) tlist
       else
-        concatMap (findQualNameInType qual name . A.toValue) tlist
+        concatMap (findQualNameInType p n . A.toValue) tlist
 
     Src.TRecord fields extRecord ->
-      concatMap (\a -> findQualNameInType qual name (A.toValue (snd a))) fields
+      concatMap (\a -> findQualNameInType p n (A.toValue (snd a))) fields
 
     Src.TUnit ->
       []
 
     Src.TTuple a b rest ->
-      findQualNameInType qual name (A.toValue a)
-      ++ findQualNameInType qual name (A.toValue b)
-      ++ concatMap (findQualNameInType qual name . A.toValue) rest
+      findQualNameInType p n (A.toValue a)
+      ++ findQualNameInType p n (A.toValue b)
+      ++ concatMap (findQualNameInType p n . A.toValue) rest
 
 
 findNameInModuleTypes :: Name -> Src.Module -> [A.Region]
@@ -2886,33 +2869,33 @@ findNameInModuleTypes name src =
 
 
 findNameInType :: Name -> Src.Type_ -> [A.Region]
-findNameInType name tipe =
+findNameInType n tipe =
   case tipe of
     Src.TLambda arg ret ->
-      findNameInType name (A.toValue arg) ++ findNameInType name (A.toValue ret)
+      findNameInType n (A.toValue arg) ++ findNameInType n (A.toValue ret)
 
     Src.TVar name ->
       []
 
-    Src.TType region name_ tlist ->
-      if name == name_ then
-        region : concatMap (findNameInType name . A.toValue) tlist
+    Src.TType region name tlist ->
+      if name == n then
+        region : concatMap (findNameInType n . A.toValue) tlist
       else
-        concatMap (findNameInType name . A.toValue) tlist
+        concatMap (findNameInType n . A.toValue) tlist
 
     Src.TTypeQual _ _ _ tlist ->
-      concatMap (findNameInType name . A.toValue) tlist
+      concatMap (findNameInType n . A.toValue) tlist
 
     Src.TRecord fields extRecord ->
-      concatMap (\a -> findNameInType name (A.toValue (snd a))) fields
+      concatMap (\a -> findNameInType n $ A.toValue $ snd a) fields
 
     Src.TUnit ->
       []
 
     Src.TTuple a b rest ->
-      findNameInType name (A.toValue a)
-      ++ findNameInType name (A.toValue b)
-      ++ concatMap (findNameInType name . A.toValue) rest
+      findNameInType n (A.toValue a)
+      ++ findNameInType n (A.toValue b)
+      ++ concatMap (findNameInType n . A.toValue) rest
 
 
 findTypeInExpr :: (Src.Type_ -> [A.Region]) -> Src.Expr -> [A.Region]
@@ -2921,8 +2904,8 @@ findTypeInExpr f expr =
 
 
 findTypeInExprHelp :: (Src.Type_ -> [A.Region]) -> [A.Region] -> Src.Expr -> [A.Region]
-findTypeInExprHelp f found (A.At region expr_) =
-    case expr_ of
+findTypeInExprHelp f found (A.At _ e) =
+    case e of
         Src.Chr _ -> found
         Src.Str _ -> found
         Src.Int _ -> found
@@ -3098,7 +3081,7 @@ diagnosticsHelp style root state filePath =
 
         Left (DiagnosticsExitBadBuild buildProblem) -> do
           case Reporting.Exit.toBuildProblemReport buildProblem of
-            (Reporting.Exit.Help.CompilerReport filePath e es) ->
+            (Reporting.Exit.Help.CompilerReport _ e es) ->
               return $ Right $ map
                 (\(Reporting.Error.Module name path _ source err) ->
                   (
