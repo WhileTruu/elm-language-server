@@ -1569,6 +1569,14 @@ elementToRenamePlaceholder element =
 
 findElement :: A.Position -> Src.Module -> Maybe Element
 findElement pos src =
+  maybe Nothing
+    (\a ->
+      if isInRegion pos (A.toRegion a) then
+        Just (A.At (A.toRegion a) (EModuleName (A.toValue a)))
+      else
+        Nothing
+    )
+    (Src._name src) <|>
   findElementInExports pos (Src._exports src) <|>
   findElementInValues pos (Src._values src) <|>
   findElementInAliases pos (Src._aliases src) <|>
@@ -2192,11 +2200,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
               do  loadResult <- loadSrcModule state details root a
 
                   case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+                    Left _ -> acc -- ignore not found - deleted files included
 
                     Right (path, src) ->
                       do  let imported =
@@ -2219,11 +2223,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
             (\a acc ->
               do  loadResult <- loadSrcModule state details root a
                   case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+                    Left _ -> acc -- ignore not found - deleted files included
 
                     Right (path, src) ->
                       let
@@ -2268,11 +2268,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
             (\a acc ->
               do  loadResult <- loadSrcModule state details root a
                   case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+                    Left _ -> acc -- ignore not found - deleted files included
 
                     Right (path, src) ->
                       let
@@ -2319,11 +2315,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
               do  loadResult <- loadSrcModule state details root a
 
                   case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+                    Left _ -> acc -- ignore not found - deleted files included
 
                     Right (path, src) ->
                       do  let imported =
@@ -2342,11 +2334,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
             (\a acc ->
               do  loadResult <- loadSrcModule state details root a
                   case loadResult of
-                    Left _ ->
-                      -- Ignore file not found - importersOf can return
-                      -- importers for deleted files since Details are loaded
-                      -- from elm-stuff
-                      acc
+                    Left _ -> acc -- ignore not found - deleted files included
 
                     Right (path, src) ->
                       let
@@ -2409,8 +2397,31 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
         return $ Map.singleton modulePath $
           A.toRegion found : varInExpr name [] exprWithoutFoundDef
 
-    FoundModuleName _ ->
-      return Map.empty
+    FoundModuleName name ->
+      do  LsReporting.report key (RefsDone 1)
+          foldr
+            (\importer acc ->
+              do  loadResult <- loadSrcModule state details root importer
+
+                  case loadResult of
+                    Left _ -> acc -- ignore not found - deleted files included
+
+                    Right (path, src) ->
+                      let
+                        maybeImport =
+                          List.find (\a -> A.toValue (Src._import a) == name)
+                            (Src._imports src)
+                      in
+                        case maybeImport of
+                          Just (Src.Import n _ _) ->
+                            do  LsReporting.report key (RefsDone 1)
+                                fmap (Map.insert path [A.toRegion n]) acc
+
+                          Nothing ->
+                            acc
+            )
+            (return $ Map.singleton modulePath [A.toRegion found])
+            (importersOf details name)
 
 
 findReferencesForImportedVar :: ModuleName.Raw -> Name -> Src.Module -> [A.Region]
