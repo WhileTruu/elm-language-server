@@ -947,7 +947,7 @@ type Found = A.Located Found_
 data Found_
   = FoundValue Src.Value
   | FoundPName Src.Expr Name
-  | FoundDef Src.Def
+  | FoundDef Src.Expr Name
   | FoundInfix Src.Infix
   | FoundAlias Src.Alias
   | FoundUnion Src.Union
@@ -1185,10 +1185,14 @@ findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns
   let
     inDefs =
       foldr
-        (\(expr,(A.At _ def)) acc ->
-          case def of
+        (\(expr,def) acc ->
+          case A.toValue def of
             (Src.Define (A.At region valueName) _ _ _) ->
-              if valueName == name then Just (A.At region (FoundDef def)) else acc
+              if valueName == name then
+                Just (A.At (A.toRegion def) (FoundDef expr name))
+              else
+                acc
+
             (Src.Destruct pattern _) ->
               fmap (\a -> A.At a (FoundPName expr name)) (findNameInPattern name pattern)
         )
@@ -1887,9 +1891,9 @@ findElementInExpr pos defs patterns expr =
           branches
 
     Src.Let defs1 body ->
+      let letDefs = List.map (\a -> (expr,a)) defs1 ++ defs in
       if isInRegion pos (A.toRegion body) then
-        let newDefs = List.map (\a -> (expr,a)) defs1 ++ defs in
-        findElementInExpr pos newDefs patterns body
+        findElementInExpr pos letDefs patterns body
       else
         foldr
           (\def acc ->
@@ -1902,7 +1906,7 @@ findElementInExpr pos defs patterns expr =
                         List.foldr
                           (\p acc1 ->
                             if isInRegion pos (A.toRegion p) then
-                              findElementInPattern pos ((expr,def) : defs) newPatterns p
+                              findElementInPattern pos letDefs newPatterns p
                             else
                               acc1
                           )
@@ -1911,7 +1915,7 @@ findElementInExpr pos defs patterns expr =
 
                       inExpr =
                         if isInRegion pos (A.toRegion e) then
-                          findElementInExpr pos ((expr,def) : defs) newPatterns e
+                          findElementInExpr pos letDefs newPatterns e
                         else
                           acc
 
@@ -1921,9 +1925,9 @@ findElementInExpr pos defs patterns expr =
 
                 Src.Destruct p e ->
                   if isInRegion pos (A.toRegion p) then
-                    findElementInPattern pos ((expr,def) : defs) ((expr,p) : patterns) p
+                    findElementInPattern pos letDefs ((expr,p) : patterns) p
                   else if isInRegion pos (A.toRegion e) then
-                    findElementInExpr pos ((expr,def) : defs) ((expr,p) : patterns) e
+                    findElementInExpr pos letDefs ((expr,p) : patterns) e
                   else
                     acc
           )
@@ -2349,8 +2353,24 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
     FoundPName expr name ->
       return $ Map.singleton modulePath (A.toRegion found : varInExpr name [] expr)
 
-    FoundDef _ ->
-      return Map.empty
+    FoundDef expr name ->
+      let
+        isFoundDef def =
+          case A.toValue def of
+            Src.Define (A.At _ n) _ _ _ -> n == name
+            Src.Destruct _ e            -> False
+
+        exprWithoutFoundDef =
+          case A.toValue expr of
+            Src.Let ds e ->
+              A.At (A.toRegion expr)
+                (Src.Let (List.filter (\a -> not (isFoundDef a)) ds) e)
+
+            _ ->
+              expr
+      in
+        return $ Map.singleton modulePath $
+          A.toRegion found : varInExpr name [] exprWithoutFoundDef
 
     FoundModuleName _ ->
       return Map.empty
