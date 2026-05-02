@@ -18,7 +18,7 @@ and that it hasn't fallen asleep or gotten stuck in an infinite loop instead.
 
 - __Go to definition__
 ![definition](images/language-server-definition.gif?raw=true)
-- __Find references__ (supports top level values, infix operators, aliases, custom types (but not variants))
+- __Find references__
 ![references](images/language-server-references.gif?raw=true)
 - __Diagnostics__ (compiler errors)
 ![diagnostics](images/language-server-diagnostics.gif?raw=true)
@@ -26,7 +26,7 @@ and that it hasn't fallen asleep or gotten stuck in an infinite loop instead.
 ![symbols](images/language-server-symbols.gif?raw=true)
 - __Formatting__ with `elm-format` (enabled when executable is available on init)
 ![format](images/language-server-format.gif?raw=true)
-- __Rename__ (based on references, supports the same stuff)
+- __Rename__
 ![rename](images/language-server-rename.gif?raw=true)
 
 ## Configuration
