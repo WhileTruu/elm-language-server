@@ -946,7 +946,7 @@ type Found = A.Located Found_
 
 data Found_
   = FoundValue Src.Value
-  | FoundPattern Src.Pattern_
+  | FoundPName Src.Expr Name
   | FoundDef Src.Def
   | FoundInfix Src.Infix
   | FoundAlias Src.Alias
@@ -1175,26 +1175,31 @@ findDefinitionForModuleName state details root moduleName =
           return $ Left exit
 
 
-findDefinitionForLowVarLocally :: Src.Module -> [A.Located Src.Def] -> [Src.Pattern] -> Name -> Maybe Found
+findDefinitionForLowVarLocally ::
+  Src.Module
+  -> [(Src.Expr,A.Located Src.Def)]
+  -> [(Src.Expr,Src.Pattern)]
+  -> Name
+  -> Maybe Found
 findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns name =
   let
     inDefs =
       foldr
-        (\(A.At _ def) acc ->
+        (\(expr,(A.At _ def)) acc ->
           case def of
             (Src.Define (A.At region valueName) _ _ _) ->
               if valueName == name then Just (A.At region (FoundDef def)) else acc
             (Src.Destruct pattern _) ->
-              fmap (\(a, b) -> A.At a (FoundPattern b)) (findDefinitionForNameInPattern name pattern)
+              fmap (\a -> A.At a (FoundPName expr name)) (findNameInPattern name pattern)
         )
         Nothing
         defs
 
     inPatterns =
       foldr
-        (\p acc ->
-          fmap (\(a, b) -> A.At a (FoundPattern b))
-            (findDefinitionForNameInPattern name p) <|> acc
+        (\(expr,p) acc ->
+          fmap (\a -> A.At a (FoundPName expr name))
+            (findNameInPattern name p) <|> acc
         )
         Nothing
         patterns
@@ -1464,29 +1469,34 @@ findLowVarDefinitionNamed name (Src.Module _ _ _ _ values _ _ _ _) =
     values
 
 
-findDefinitionForNameInPattern :: Name -> Src.Pattern -> Maybe (A.Region, Src.Pattern_)
-findDefinitionForNameInPattern name pattern@(A.At _ pattern_) =
-  case pattern_ of
+findNameInPattern :: Name -> Src.Pattern -> Maybe A.Region
+findNameInPattern name pattern =
+  case A.toValue pattern of
     Src.PAnything -> Nothing
-    Src.PVar pname ->
-      if pname == name then Just (A.toRegion pattern, A.toValue pattern) else Nothing
-    Src.PRecord names ->
-      foldr (\(A.At loc name_) acc -> if name_ == name then Just (loc, pattern_) else acc) Nothing names
-    Src.PAlias aPattern (A.At loc aName) ->
-      if aName == name then
-        Just (loc, pattern_)
-      else
-        findDefinitionForNameInPattern name aPattern
+    Src.PVar n    -> if n == name then Just (A.toRegion pattern) else Nothing
+
+    Src.PRecord ns ->
+      foldr (\(A.At r n) acc -> if n == name then Just r else acc) Nothing ns
+
+    Src.PAlias p (A.At r n) ->
+      if n == name then Just r else findNameInPattern name p
+
     Src.PUnit -> Nothing
-    Src.PTuple a b c ->
-      foldr (\p acc -> findDefinitionForNameInPattern  name p <|> acc) Nothing (a : b : c)
-    Src.PCtor _ _ args ->
-      foldr (\p acc -> findDefinitionForNameInPattern name p <|> acc) Nothing args
+
+    Src.PTuple a b cs ->
+      foldr (\p acc -> findNameInPattern name p <|> acc) Nothing (a : b : cs)
+
+    Src.PCtor _ _ ps ->
+      foldr (\p acc -> findNameInPattern name p <|> acc) Nothing ps
+
     Src.PCtorQual _ _ _ _ -> Nothing
-    Src.PList patterns ->
-      foldr (\p acc -> findDefinitionForNameInPattern name p <|> acc) Nothing patterns
-    Src.PCons a b ->
-      findDefinitionForNameInPattern name a <|> findDefinitionForNameInPattern name b
+
+    Src.PList ps ->
+      foldr (\p acc -> findNameInPattern name p <|> acc) Nothing ps
+
+    Src.PCons hd tl ->
+      findNameInPattern name hd <|> findNameInPattern name tl
+
     Src.PChr _ -> Nothing
     Src.PStr _ -> Nothing
     Src.PInt _ -> Nothing
@@ -1496,13 +1506,13 @@ type Element = A.Located Element_
 
 
 data Element_
-  = EVar [A.Located Src.Def] [Src.Pattern] Name
+  = EVar [(Src.Expr,A.Located Src.Def)] [(Src.Expr,Src.Pattern)] Name
   | EVarQual Name Name
   | ECtor Name
   | ECtorQual Name Name
   | EType Name
   | ETypeQual Name Name
-  | EAccess [A.Located Src.Def] [Src.Pattern] Src.Expr Name
+  | EAccess [(Src.Expr,A.Located Src.Def)] [(Src.Expr,Src.Pattern)] Src.Expr Name
   | EInfix Name
   | EModuleName Name
 
@@ -1699,23 +1709,23 @@ findElementInValues pos values =
                   List.foldr
                     (\pattern@(A.At region _) acc ->
                       if isInRegion pos region then
-                        findElementInPattern pos [] patterns pattern
+                        findElementInPattern pos [] (List.map (\a -> (body,a)) patterns) pattern
                       else
                         acc
                     )
                     Nothing
                     patterns
 
-              a =
+              inValueNameOrBody =
                 if isPositionOnValueName pos located
                   then Just (A.At (A.toRegion name) (EVar [] [] (A.toValue name)))
                 else if isInRegion pos valueRegion
-                  then findElementInExpr pos [] patterns body
+                  then findElementInExpr pos [] (List.map (\a -> (body,a)) patterns) body
                 else Nothing
 
-              b = findElementInType pos Control.Monad.=<< type_
+              inType = findElementInType pos Control.Monad.=<< type_
           in
-          inPatterns <|> a <|> b <|> found
+          inPatterns <|> inValueNameOrBody <|> inType <|> found
     )
     Nothing
     values
@@ -1774,39 +1784,32 @@ isInRegion (A.Position row col) (A.Region (A.Position startRow startCol) (A.Posi
 
 findElementInExpr
   :: A.Position
-  -> [A.Located Src.Def]
-  -> [Src.Pattern]
+  -> [(Src.Expr,A.Located Src.Def)]
+  -> [(Src.Expr,Src.Pattern)]
   -> Src.Expr
   -> Maybe Element
-findElementInExpr position defs patterns rootExpr =
-  case A.toValue rootExpr of
-    Src.Chr _ ->
-      Nothing
-
-    Src.Str _ ->
-      Nothing
-
-    Src.Int _ ->
-      Nothing
-
-    Src.Float _ ->
-      Nothing
+findElementInExpr pos defs patterns expr =
+  case A.toValue expr of
+    Src.Chr   _ -> Nothing
+    Src.Str   _ -> Nothing
+    Src.Int   _ -> Nothing
+    Src.Float _ -> Nothing
 
     Src.Var varType name ->
       case varType of
-        Src.LowVar -> Just $ A.At (A.toRegion rootExpr) $ EVar defs patterns name
-        Src.CapVar -> Just $ A.At (A.toRegion rootExpr) $ ECtor name
+        Src.LowVar -> Just $ A.At (A.toRegion expr) $ EVar defs patterns name
+        Src.CapVar -> Just $ A.At (A.toRegion expr) $ ECtor name
 
     Src.VarQual varType prefix name ->
       case varType of
-        Src.LowVar -> Just $ A.At (A.toRegion rootExpr) $ EVarQual prefix name
-        Src.CapVar -> Just $ A.At (A.toRegion rootExpr) $ ECtorQual prefix name
+        Src.LowVar -> Just $ A.At (A.toRegion expr) $ EVarQual prefix name
+        Src.CapVar -> Just $ A.At (A.toRegion expr) $ ECtorQual prefix name
 
     Src.List exprs ->
       foldr
         (\a acc ->
-          if isInRegion position (A.toRegion a) then
-            findElementInExpr position defs patterns a
+          if isInRegion pos (A.toRegion a) then
+            findElementInExpr pos defs patterns a
           else
             acc
         )
@@ -1814,24 +1817,24 @@ findElementInExpr position defs patterns rootExpr =
         exprs
 
     Src.Op name ->
-      Just $ A.At (A.toRegion rootExpr) $ EInfix name
+      Just $ A.At (A.toRegion expr) $ EInfix name
 
-    Src.Negate expr ->
-      if isInRegion position (A.toRegion expr) then
-        findElementInExpr position defs patterns expr
+    Src.Negate e ->
+      if isInRegion pos (A.toRegion e) then
+        findElementInExpr pos defs patterns e
       else
         Nothing
 
     Src.Binops ops final ->
-      if isInRegion position (A.toRegion final) then
-        findElementInExpr position defs patterns final
+      if isInRegion pos (A.toRegion final) then
+        findElementInExpr pos defs patterns final
       else
         foldr
-          (\(expr_, op) acc ->
-            if isInRegion position (A.toRegion op) then
+          (\(e, op) acc ->
+            if isInRegion pos (A.toRegion op) then
               Just $ A.At (A.toRegion op) $ EInfix (A.toValue op)
-            else if isInRegion position (A.toRegion expr_) then
-              findElementInExpr position defs patterns expr_
+            else if isInRegion pos (A.toRegion e) then
+              findElementInExpr pos defs patterns e
             else
               acc
           )
@@ -1839,13 +1842,14 @@ findElementInExpr position defs patterns rootExpr =
           ops
 
     Src.Lambda srcArgs body ->
-      if isInRegion position (A.toRegion body) then
-        findElementInExpr position defs (srcArgs ++ patterns) body
+      let ps = List.map (\a -> (body,a)) srcArgs in
+      if isInRegion pos (A.toRegion body) then
+        findElementInExpr pos defs (ps ++ patterns) body
       else
         List.foldr
           (\arg acc ->
-            if isInRegion position (A.toRegion arg) then
-              findElementInPattern position defs (srcArgs ++ patterns) arg
+            if isInRegion pos (A.toRegion arg) then
+              findElementInPattern pos defs (ps ++ patterns) arg
             else
               acc
           )
@@ -1853,13 +1857,13 @@ findElementInExpr position defs patterns rootExpr =
           srcArgs
 
     Src.Call func args ->
-      if isInRegion position (A.toRegion func) then
-        findElementInExpr position defs patterns func
+      if isInRegion pos (A.toRegion func) then
+        findElementInExpr pos defs patterns func
       else
         foldr
           (\a acc ->
-            if isInRegion position (A.toRegion a) then
-              findElementInExpr position defs patterns a
+            if isInRegion pos (A.toRegion a) then
+              findElementInExpr pos defs patterns a
             else
               acc
           )
@@ -1867,15 +1871,15 @@ findElementInExpr position defs patterns rootExpr =
           args
 
     Src.If branches finally_ ->
-      if isInRegion position (A.toRegion finally_) then
-        findElementInExpr position defs patterns finally_
+      if isInRegion pos (A.toRegion finally_) then
+        findElementInExpr pos defs patterns finally_
       else
         foldr
           (\(condition, branch) acc ->
-            if isInRegion position (A.toRegion condition) then
-              findElementInExpr position defs patterns condition
-            else if isInRegion position (A.toRegion branch) then
-              findElementInExpr position defs patterns branch
+            if isInRegion pos (A.toRegion condition) then
+              findElementInExpr pos defs patterns condition
+            else if isInRegion pos (A.toRegion branch) then
+              findElementInExpr pos defs patterns branch
             else
               acc
           )
@@ -1883,84 +1887,87 @@ findElementInExpr position defs patterns rootExpr =
           branches
 
     Src.Let defs1 body ->
-      if isInRegion position (A.toRegion body) then
-        findElementInExpr position (defs1 ++ defs) patterns body
+      if isInRegion pos (A.toRegion body) then
+        let newDefs = List.map (\a -> (expr,a)) defs1 ++ defs in
+        findElementInExpr pos newDefs patterns body
       else
         foldr
           (\def acc ->
               case A.toValue def of
-                Src.Define _ patterns1 expr type_ ->
+                Src.Define _ ps e t ->
                   let
+                      newPatterns = List.map (\a -> (body, a)) ps ++ patterns
+
                       inPatterns =
                         List.foldr
-                          (\pattern acc1 ->
-                            if isInRegion position (A.toRegion pattern) then
-                              findElementInPattern position (def : defs) (patterns1 ++ patterns) pattern
+                          (\p acc1 ->
+                            if isInRegion pos (A.toRegion p) then
+                              findElementInPattern pos ((expr,def) : defs) newPatterns p
                             else
                               acc1
                           )
                           Nothing
-                          patterns1
+                          ps
 
-                      a =
-                        if isInRegion position (A.toRegion expr) then
-                          findElementInExpr position (def : defs) (patterns1 ++ patterns) expr
+                      inExpr =
+                        if isInRegion pos (A.toRegion e) then
+                          findElementInExpr pos ((expr,def) : defs) newPatterns e
                         else
                           acc
 
-                      b = findElementInType position Control.Monad.=<< type_
+                      inType = findElementInType pos Control.Monad.=<< t
                   in
-                  inPatterns <|> a <|> b <|> acc
+                  inPatterns <|> inExpr <|> inType <|> acc
 
-                Src.Destruct pattern expr ->
-                  if isInRegion position (A.toRegion pattern) then
-                    findElementInPattern position (def : defs) (pattern : patterns) pattern
-                  else if isInRegion position (A.toRegion expr) then
-                    findElementInExpr position (def : defs) (pattern : patterns) expr
+                Src.Destruct p e ->
+                  if isInRegion pos (A.toRegion p) then
+                    findElementInPattern pos ((expr,def) : defs) ((expr,p) : patterns) p
+                  else if isInRegion pos (A.toRegion e) then
+                    findElementInExpr pos ((expr,def) : defs) ((expr,p) : patterns) e
                   else
                     acc
           )
           Nothing
           defs1
 
-    Src.Case expr branches ->
-      if isInRegion position (A.toRegion expr) then
-        findElementInExpr position defs patterns expr
+    Src.Case e bs ->
+      if isInRegion pos (A.toRegion e) then
+        findElementInExpr pos defs patterns e
       else
         foldr
-          (\(pattern, branch) acc ->
-            if isInRegion position (A.toRegion pattern) then
-              findElementInPattern position defs (pattern : patterns) pattern
-            else if isInRegion position (A.toRegion branch) then
-              findElementInExpr position defs (pattern : patterns) branch
+          (\(p, b) acc ->
+            if isInRegion pos (A.toRegion p) then
+              findElementInPattern pos defs ((expr,p) : patterns) p
+            else if isInRegion pos (A.toRegion b) then
+              findElementInExpr pos defs ((expr,p) : patterns) b
             else
               acc
           )
           Nothing
-          branches
+          bs
 
     Src.Accessor field ->
       Nothing
 
     Src.Access record field ->
-      if isInRegion position (A.toRegion field) then
+      if isInRegion pos (A.toRegion field) then
         Just $ A.At (A.toRegion field) $ EAccess defs patterns record (A.toValue field)
-      else if isInRegion position (A.toRegion record) then
-        findElementInExpr position defs patterns record
+      else if isInRegion pos (A.toRegion record) then
+        findElementInExpr pos defs patterns record
       else
         Nothing
 
     Src.Update starter fields ->
-      if isInRegion position (A.toRegion starter) then
+      if isInRegion pos (A.toRegion starter) then
         Just $ A.At (A.toRegion starter) $ EVar defs patterns (A.toValue starter)
 
       else
         foldr
           (\(field, value) acc ->
-            if isInRegion position (A.toRegion field) then
+            if isInRegion pos (A.toRegion field) then
               Just $ A.At (A.toRegion field) $ EVar defs patterns (A.toValue field)
-            else if isInRegion position (A.toRegion value) then
-              findElementInExpr position defs patterns value
+            else if isInRegion pos (A.toRegion value) then
+              findElementInExpr pos defs patterns value
             else
               acc
           )
@@ -1970,8 +1977,8 @@ findElementInExpr position defs patterns rootExpr =
     Src.Record fields ->
       foldr
         (\(field, value) acc ->
-          if isInRegion position (A.toRegion value) then
-            findElementInExpr position defs patterns value
+          if isInRegion pos (A.toRegion value) then
+            findElementInExpr pos defs patterns value
           else
             acc
         )
@@ -1983,11 +1990,11 @@ findElementInExpr position defs patterns rootExpr =
 
     Src.Tuple a b cs ->
       foldr
-        (\expr exprs ->
-          if isInRegion position (A.toRegion expr) then
-            findElementInExpr position defs patterns expr
+        (\e es ->
+          if isInRegion pos (A.toRegion e) then
+            findElementInExpr pos defs patterns e
           else
-            exprs
+            es
         )
         Nothing
         (a : b : cs)
@@ -1998,8 +2005,8 @@ findElementInExpr position defs patterns rootExpr =
 
 findElementInPattern
   :: A.Position
-  -> [A.Located Src.Def]
-  -> [Src.Pattern]
+  -> [(Src.Expr,A.Located Src.Def)]
+  -> [(Src.Expr,Src.Pattern)]
   -> Src.Pattern
   -> Maybe Element
 findElementInPattern pos rootDefs rootPatterns rootPattern =
@@ -2339,8 +2346,8 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
             (return $ Map.singleton modulePath local)
             (importersOf details (Src.getName defSrc))
 
-    FoundPattern _ ->
-      return Map.empty
+    FoundPName expr name ->
+      return $ Map.singleton modulePath (A.toRegion found : varInExpr name [] expr)
 
     FoundDef _ ->
       return Map.empty
@@ -2544,7 +2551,7 @@ findVarInValue :: Name -> Src.Value -> [A.Region]
 findVarInValue name (Src.Value _ patterns expr _) =
   -- Find out what this is about; the commit that added it says
   -- "find modules correctly from inside packages"
-  if any (Maybe.isJust . findDefinitionForNameInPattern name) patterns
+  if any (Maybe.isJust . findNameInPattern name) patterns
     then []
     else varInExpr name [] expr
 
@@ -2603,7 +2610,7 @@ varInExpr name regions rootExpr =
         exprsAndNames
 
     Src.Lambda patterns expr ->
-      if any (Maybe.isJust . findDefinitionForNameInPattern name) patterns
+      if any (Maybe.isJust . findNameInPattern name) patterns
         then regions
         else varInExpr name regions expr
 
@@ -2625,7 +2632,7 @@ varInExpr name regions rootExpr =
               case A.toValue a of
                 Src.Define (A.At _ name_) _ _ _ -> name == name_
                 Src.Destruct pattern _ ->
-                  Maybe.isJust (findDefinitionForNameInPattern name pattern)
+                  Maybe.isJust (findNameInPattern name pattern)
             )
           defs
       in
@@ -2642,7 +2649,7 @@ varInExpr name regions rootExpr =
           defs
 
     Src.Case expr branches ->
-      if any (Maybe.isJust . findDefinitionForNameInPattern name . fst) branches
+      if any (Maybe.isJust . findNameInPattern name . fst) branches
         then regions
         else List.foldl
           (\a (_, x) ->
