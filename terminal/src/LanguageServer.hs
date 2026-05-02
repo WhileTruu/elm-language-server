@@ -1735,6 +1735,17 @@ findElementInValues pos values =
     values
 
 
+isPositionOnValueName :: A.Position -> A.Located Src.Value -> Bool
+isPositionOnValueName pos value =
+    let (A.At (A.Region (A.Position sx sy) _) (Src.Value name _ _ typeAnn)) = value
+        valNameLen = fromIntegral (length (Name.toChars (A.toValue name)))
+    in
+    isInRegion pos (A.toRegion name)
+      || (Maybe.isJust typeAnn
+           && isInRegion pos (A.Region (A.Position sx 0) (A.Position sx valNameLen))
+         )
+
+
 findElementInType :: A.Position -> Src.Type -> Maybe Element
 findElementInType pos type_ =
   if isInRegion pos (A.toRegion type_)
@@ -1767,17 +1778,6 @@ findElementInType pos type_ =
 
     else
       Nothing
-
-
-isPositionOnValueName :: A.Position -> A.Located Src.Value -> Bool
-isPositionOnValueName pos value =
-    let (A.At (A.Region (A.Position sx sy) _) (Src.Value name _ _ typeAnn)) = value
-        valNameLen = fromIntegral (length (Name.toChars (A.toValue name)))
-    in
-    isInRegion pos (A.toRegion name)
-      || (Maybe.isJust typeAnn
-           && isInRegion pos (A.Region (A.Position sx 0) (A.Position sx valNameLen))
-         )
 
 
 isInRegion :: A.Position -> A.Region -> Bool
@@ -1898,8 +1898,30 @@ findElementInExpr pos defs patterns expr =
         foldr
           (\def acc ->
               case A.toValue def of
-                Src.Define _ ps e t ->
+                Src.Define name ps e t ->
                   let
+                      onName =
+                        if isInRegion pos (A.toRegion name) then
+                          Just $ A.At (A.toRegion name) $ EVar letDefs patterns (A.toValue name)
+                        else
+                          Nothing
+
+                      onNameInType =
+                        case t of
+                          Just _ ->
+                            let
+                              (A.Region (A.Position r c) _) = A.toRegion def
+                              nameLen = fromIntegral (length (Name.toChars (A.toValue name)))
+                              region = A.Region (A.Position r c) (A.Position r (c + nameLen))
+                            in
+                            if isInRegion pos region then
+                              Just $ A.At region $ EVar letDefs patterns (A.toValue name)
+                            else
+                              Nothing
+
+                          Nothing ->
+                            Nothing
+
                       newPatterns = List.map (\a -> (body, a)) ps ++ patterns
 
                       inPatterns =
@@ -1921,7 +1943,7 @@ findElementInExpr pos defs patterns expr =
 
                       inType = findElementInType pos Control.Monad.=<< t
                   in
-                  inPatterns <|> inExpr <|> inType <|> acc
+                  onName <|> inPatterns <|> inExpr <|> inType <|> acc
 
                 Src.Destruct p e ->
                   if isInRegion pos (A.toRegion p) then
