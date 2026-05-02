@@ -181,7 +181,7 @@ handleMessage state method body =
                             ]
                           , "serverInfo" .= Aeson.object
                             [ "name" .= ("whiletruu-elm-language-server" :: String)
-                            , "version" .= ("1.0.0" :: String)
+                            , "version" .= ("1.1.0" :: String)
                             ]
                           ]
                   respond requestID response
