@@ -2373,15 +2373,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
             (importersOf details (Src.getName defSrc))
 
     FoundPName expr name ->
-      return $ Map.singleton modulePath (A.toRegion found : varInExpr name [] expr)
-
-    FoundDef expr name ->
       let
-        isFoundDef def =
-          case A.toValue def of
-            Src.Define (A.At _ n) _ _ _ -> n == name
-            Src.Destruct _ e            -> False
-
         exprWithoutFoundDef =
           case A.toValue expr of
             Src.Let ds e ->
@@ -2390,7 +2382,30 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
 
             _ ->
               expr
+
+        isFoundDef def =
+          case A.toValue def of
+            Src.Define _ _ _ _ -> False
+            Src.Destruct p _   -> Maybe.isJust (findNameInPattern name p)
       in
+      return $ Map.singleton modulePath (A.toRegion found : varInExpr name [] exprWithoutFoundDef)
+
+    FoundDef expr name ->
+      let
+        exprWithoutFoundDef =
+          case A.toValue expr of
+            Src.Let ds e ->
+              A.At (A.toRegion expr)
+                (Src.Let (List.filter (\a -> not (isFoundDef a)) ds) e)
+
+            _ ->
+              expr
+
+        isFoundDef def =
+          case A.toValue def of
+            Src.Define (A.At _ n) _ _ _ -> n == name
+            Src.Destruct _ _            -> False
+        in
         return $ Map.singleton modulePath $
           A.toRegion found : varInExpr name [] exprWithoutFoundDef
 
