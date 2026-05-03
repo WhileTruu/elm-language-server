@@ -215,15 +215,12 @@ handleMessage state method body =
 
                     Right reportsMap ->
                       do  let mvar = _prevPublishedDiagnosticsFiles state
-                          prev <- Control.Concurrent.MVar.readMVar mvar
-
+                          prev <- Control.Concurrent.MVar.takeMVar mvar
                           let new = Map.keysSet reportsMap
-                          let diff = Set.difference prev new
-
-                          mapM_ (\a -> publishReportDiagnostic a 1 []) diff
-
                           Control.Concurrent.MVar.putMVar mvar new
 
+                          let diff = Set.difference prev new
+                          mapM_ (\a -> publishReportDiagnostic a 1 []) diff
                           Control.Monad.forM_ (Map.toList reportsMap) $
                             \(reportsFilePath, reports) ->
                                publishReportDiagnostic reportsFilePath 1 reports
