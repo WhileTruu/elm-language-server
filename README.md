@@ -20,7 +20,7 @@ and that it hasn't fallen asleep or gotten stuck in an infinite loop instead.
 ![definition](images/language-server-definition.gif?raw=true)
 - __Find references__
 ![references](images/language-server-references.gif?raw=true)
-- __Diagnostics__ (compiler errors)
+- __Diagnostics__ (compiler errors; on save)
 ![diagnostics](images/language-server-diagnostics.gif?raw=true)
 - __Document symbols__
 ![symbols](images/language-server-symbols.gif?raw=true)
