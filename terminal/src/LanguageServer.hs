@@ -1,12 +1,16 @@
+{-# OPTIONS_GHC -Wall #-}
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+{-# OPTIONS_GHC -Werror=incomplete-uni-patterns #-}
+{-# OPTIONS_GHC -Werror=incomplete-record-updates #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeSynonymInstances #-}
-{-# LANGUAGE FlexibleInstances #-}
 
 module LanguageServer
   ( run
   )
   where
 
+
+import qualified Control.Monad
 import Control.Applicative ((<|>))
 import qualified Control.Concurrent.MVar
 import qualified Control.Exception as Exception
@@ -16,97 +20,54 @@ import qualified Data.Aeson.Key as Aeson.Key
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Time
 import qualified Data.Bifunctor
-import qualified Data.Functor
-import qualified Debug.Trace
-import Data.Foldable (foldrM)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy.Char8 as BSLC
 import qualified Data.Char as Char
 import qualified Data.Maybe as Maybe
 import qualified Data.List as List
-import Data.Name (Name)
 import qualified Data.Name as Name
-import qualified Data.Map.Utils as Map
+import Data.Name (Name)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.NonEmptyList
-import qualified Data.OneOrMore as OneOrMore
-import qualified Data.Map
-import qualified Data.Either
 import qualified Data.ByteString.UTF8 as BS_UTF8
-
+import Data.Function ((&))
 import qualified System.IO as IO
 import qualified System.Directory as Dir
 import qualified System.Exit as Exit
 import qualified System.Process as Proc
-
 import qualified File
 import qualified System.FilePath as Path
 import System.FilePath ((</>), (<.>))
-
 import qualified Stuff
 import qualified Build
-import qualified Compile
-
 import qualified Parse.Module as Parse
-import qualified Parse.Variable as Parse
-
 import qualified Reporting
 import qualified Reporting.Doc
 import qualified Reporting.Error
-import qualified Reporting.Error.Syntax
 import qualified Reporting.Exit
-import qualified Reporting.Warning
 import qualified Reporting.Exit.Help
 import qualified Reporting.Report
 import qualified Reporting.Render.Code as Code
 import qualified Reporting.Task as Task
 import qualified Reporting.Annotation as A
-import qualified Reporting.Result
-import qualified Reporting.Error.Type
-import qualified Reporting.Error.Docs
-import qualified Reporting.Render.Type.Localizer
-
 import qualified Elm.Details as Details
 import qualified Elm.Outline as Outline
 import qualified Elm.Version as Version
-import qualified Elm.Interface as Interface
-import qualified Elm.Docs as Docs
-import qualified Elm.Compiler.Type.Extract as Extract
-import qualified Elm.Compiler.Type as Type
-
 import qualified Elm.Package as Pkg
 import qualified Deps.Registry
-import qualified Nitpick.PatternMatches
-import qualified Optimize.Module
-
 import qualified AST.Source as Src
-import qualified AST.Canonical as Can
-import qualified Canonicalize.Module
-import qualified AST.Optimized as Opt
 import qualified Elm.ModuleName as ModuleName
-
 import qualified BackgroundWriter as BW
-
-import qualified Type.Constrain.Module as Type
-import qualified System.IO.Unsafe
-import qualified Type.Solve as Type
-
-import qualified Json.String
-import qualified Control.Monad
-
-import Data.Function ((&))
-
 import qualified Http
-
 import LanguageServer.Reporting as LsReporting
 
 
 data State =
   State
     { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
-    , _prevPublishedDiagnosticsFiles :: Control.Concurrent.MVar.MVar [FilePath]
+    , _prevPublishedDiagnosticsFiles :: Control.Concurrent.MVar.MVar (Set.Set FilePath)
     , _elmFormat :: Control.Concurrent.MVar.MVar (Maybe FilePath)
     }
 
@@ -114,7 +75,7 @@ data State =
 run :: IO ()
 run =
   do  changedFiles <- Control.Concurrent.MVar.newMVar Map.empty
-      prevPublishedDiagnosticsFiles <- Control.Concurrent.MVar.newMVar []
+      prevPublishedDiagnosticsFiles <- Control.Concurrent.MVar.newMVar Set.empty
       elmFormat <- Control.Concurrent.MVar.newMVar Nothing
       runLoop $ State changedFiles prevPublishedDiagnosticsFiles elmFormat
 
@@ -155,7 +116,7 @@ handleMessage state method body =
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (requestID, rootPath, elmFormatPath) ->
+            Right (requestID, _rootPath, elmFormatPath) ->
               do  elmFormat <- getElmFormat elmFormatPath
 
                   Control.Concurrent.MVar.modifyMVar_ (_elmFormat state) $
@@ -222,7 +183,7 @@ handleMessage state method body =
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (version, filePath, text) ->
+            Right (_version, filePath, text) ->
               Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
                 return $ Map.insert filePath (BS_UTF8.fromString text) a
 
@@ -244,31 +205,28 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right filePath ->
-              do  let mVar = _changedFiles state
-
-                  style <- Reporting.languageServer
-                  diagnosticsResult <- diagnostics style state filePath
+              do  style <- Reporting.languageServer
+                  diagnosticsResult <- diagnostics style filePath
 
                   case diagnosticsResult of
                     Left err ->
                       showMessage MessageTypeError $ Reporting.Exit.toString $
                         diagnosticsExitToReport err
 
-                    Right stuffs ->
-                      do  prev <- Control.Concurrent.MVar.readMVar (_prevPublishedDiagnosticsFiles state)
+                    Right reportsMap ->
+                      do  let mvar = _prevPublishedDiagnosticsFiles state
+                          prev <- Control.Concurrent.MVar.readMVar mvar
 
-                          let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
+                          let new = Map.keysSet reportsMap
+                          let diff = Set.difference prev new
 
                           mapM_ (\a -> publishReportDiagnostic a 1 []) diff
 
-                          Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state)
-                            (\_ -> pure (map (\(a,_,_) -> a) stuffs))
+                          Control.Concurrent.MVar.putMVar mvar new
 
-                          mapM_
-                            (\(reportsFilePath, i, reports) ->
-                              publishReportDiagnostic reportsFilePath i reports
-                            )
-                            stuffs
+                          Control.Monad.forM_ (Map.toList reportsMap) $
+                            \(reportsFilePath, reports) ->
+                               publishReportDiagnostic reportsFilePath 1 reports
 
     "textDocument/didClose" ->
       do  let result =
@@ -314,7 +272,7 @@ handleMessage state method body =
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (version, filePath, changes) ->
+            Right (_version, filePath, changes) ->
                do  let mVar = _changedFiles state
                    files <- Control.Concurrent.MVar.takeMVar mVar
                    let updatedFiles = Map.adjust (applyChanges changes) filePath files
@@ -467,13 +425,12 @@ handleMessage state method body =
 
                   case referencesResult of
                     Right references ->
-                      do  let amount = length (concat (Map.elems references))
-                          respond requestID $ Aeson.toJSON $
-                             encodeWorkspaceEdit references (Name.fromChars newName)
+                      respond requestID $ Aeson.toJSON $
+                        encodeWorkspaceEdit references (Name.fromChars newName)
 
                     Left err ->
-                      do  respondErr requestID $ Reporting.Exit.toString $
-                            definitionExitToReport filePath err
+                      respondErr requestID $ Reporting.Exit.toString $
+                        definitionExitToReport filePath err
 
     "textDocument/formatting" ->
       do  let result =
@@ -619,26 +576,28 @@ applyChanges changes content =
 
 applyChange :: BS.ByteString -> A.Position -> A.Position -> String -> BS.ByteString
 applyChange content (A.Position sr sc) (A.Position er ec) newTextStr =
-  let newText = BS_UTF8.fromString newTextStr
-      lines_ = BSC.split '\n' content
-      ( before, rest ) = splitAt (fromIntegral sr - 1) lines_
-      ( startTargetLine, afterStart ) =
-        case rest of
-          a : b -> ( a, b )
-          [] -> ( BS.empty, [] )
+  let
+    newText = BS_UTF8.fromString newTextStr
+    lines_ = BSC.split '\n' content
+    ( before, rest ) = splitAt (fromIntegral sr - 1) lines_
+    startTargetLine =
+      case rest of
+        a : _ -> a
+        []    -> BS.empty
 
-      endRest = drop (fromIntegral er - fromIntegral sr) rest
+    endRest = drop (fromIntegral er - fromIntegral sr) rest
 
-      ( endTargetLine, afterEnd ) =
-        case endRest of
-          a : b -> ( a, b )
-          [] -> ( BS.empty, [] )
+    ( endTargetLine, afterEnd ) =
+      case endRest of
+        a : b -> ( a, b )
+        [] -> ( BS.empty, [] )
 
-      ( start, _ ) = BSC.splitAt (fromIntegral sc - 1) startTargetLine
-      ( _, end ) = BSC.splitAt (fromIntegral ec - 1) endTargetLine
+    ( start, _ ) = BSC.splitAt (fromIntegral sc - 1) startTargetLine
+    ( _, end ) = BSC.splitAt (fromIntegral ec - 1) endTargetLine
 
-      updated = BS.concat [ start, newText, end ]
-  in BSC.intercalate (BS_UTF8.fromString "\n") $ before ++ (updated : afterEnd)
+    updated = BS.concat [ start, newText, end ]
+  in
+    BSC.intercalate (BS_UTF8.fromString "\n") $ before ++ (updated : afterEnd)
 
 
 readHeader :: IO Int
@@ -1034,7 +993,7 @@ findDefinitionForElement state details root path src element =
         do  let local = findDefinitionForCtorInModule name src
             let potentialSources =
                   filter
-                    (\import_@(Src.Import iName iAlias iExposing) ->
+                    (\(Src.Import _ _ iExposing) ->
                       case iExposing of
                         Src.Open -> True
                         Src.Explicit exposedList -> any (\exposed ->
@@ -1078,7 +1037,7 @@ findDefinitionForElement state details root path src element =
         do  let local = findDefinitionForTypeInModule name src
             let potentialSources =
                   filter
-                    (\import_@(Src.Import iName iAlias iExposing) ->
+                    (\(Src.Import _ _ iExposing) ->
                       case iExposing of
                         Src.Open -> True
                         Src.Explicit exposedList -> any (\exposed ->
@@ -1164,8 +1123,8 @@ findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns
       foldr
         (\(expr,def) acc ->
           case A.toValue def of
-            (Src.Define (A.At region valueName) _ _ _) ->
-              if valueName == name then
+            (Src.Define (A.At _ n) _ _ _) ->
+              if n == name then
                 Just (A.At (A.toRegion def) (FoundDef expr name))
               else
                 acc
@@ -1241,7 +1200,7 @@ findDefinitionForLowVarInImports state details root imports name =
   let
     potentialSources =
       filter
-        (\import_@(Src.Import iName iAlias iExposing) ->
+        (\(Src.Import _ _ iExposing) ->
           case iExposing of
             Src.Open -> True
             Src.Explicit exposedList -> any (\exposed ->
@@ -1321,7 +1280,7 @@ findDefinitionForCtorInModule name src =
 
     inUnions =
       foldr
-        (\(A.At _ union@(Src.Union (A.At region unionName) _ variants)) acc ->
+        (\(A.At _ (Src.Union (A.At _ _) _ variants)) acc ->
           foldr
             (\a acc1 ->
               if A.toValue (fst a) == name
@@ -1350,7 +1309,7 @@ findDefinitionForTypeInModule name src =
 
     inUnions =
       foldr
-        (\(A.At _ union@(Src.Union (A.At region unionName) _ variants)) acc ->
+        (\(A.At _ union@(Src.Union (A.At region unionName) _ _)) acc ->
           if unionName == name
             then Just (A.At region (FoundUnion union))
             else acc
@@ -1372,7 +1331,7 @@ findDefinitionForInfixInImports state details root imports name =
   let
     potentialSources =
       filter
-        (\import_@(Src.Import iName iAlias iExposing) ->
+        (\(Src.Import _ _ iExposing) ->
           case iExposing of
             Src.Open -> True
             Src.Explicit exposedList -> any (\exposed ->
@@ -1513,7 +1472,7 @@ elementToStr element =
       Name.toChars name ++ " (Type)"
     ETypeQual prefix name ->
       Name.toChars prefix ++ "." ++ Name.toChars name ++ " (TypeQual)"
-    EAccess _ _ record field ->
+    EAccess _ _ _ field ->
       "." ++ Name.toChars field ++ " (Access)"
     EInfix name ->
       Name.toChars name ++ " (Infix)"
@@ -1526,17 +1485,17 @@ elementToRenamePlaceholder element =
   case A.toValue element of
     EVar _ _ name ->
       Name.toChars name
-    EVarQual prefix name ->
+    EVarQual _ name ->
       Name.toChars name
     ECtor name ->
       Name.toChars name
-    ECtorQual prefix name ->
+    ECtorQual _ name ->
       Name.toChars name
     EType name ->
       Name.toChars name
-    ETypeQual prefix name ->
+    ETypeQual _ name ->
       Name.toChars name
-    EAccess _ _ record field ->
+    EAccess _ _ _ field ->
       Name.toChars field
     EInfix name ->
       Name.toChars name
@@ -1592,7 +1551,7 @@ findElementInExports pos exposing =
 findElementInAliases :: A.Position -> [A.Located Src.Alias] -> Maybe Element
 findElementInAliases pos aliases =
   foldr
-    (\(A.At region (Src.Alias name _ type_)) found ->
+    (\(A.At _ (Src.Alias name _ type_)) found ->
       let inName =
             if isInRegion pos (A.toRegion name)
               then Just (A.At (A.toRegion name) (EType (A.toValue name)))
@@ -1609,7 +1568,7 @@ findElementInAliases pos aliases =
 findElementInUnions :: A.Position -> [A.Located Src.Union] -> Maybe Element
 findElementInUnions pos unions =
   foldr
-    (\(A.At region (Src.Union name _ variants)) found ->
+    (\(A.At _ (Src.Union name _ variants)) found ->
       let inName =
             if isInRegion pos (A.toRegion name)
               then Just (A.At (A.toRegion name) (EType (A.toValue name)))
@@ -1722,12 +1681,12 @@ findElementInValues pos values =
 
 isPositionOnValueName :: A.Position -> A.Located Src.Value -> Bool
 isPositionOnValueName pos value =
-    let (A.At (A.Region (A.Position sx sy) _) (Src.Value name _ _ typeAnn)) = value
+    let (A.At (A.Region (A.Position sr _) _) (Src.Value name _ _ typeAnn)) = value
         valNameLen = fromIntegral (length (Name.toChars (A.toValue name)))
     in
     isInRegion pos (A.toRegion name)
       || (Maybe.isJust typeAnn
-           && isInRegion pos (A.Region (A.Position sx 0) (A.Position sx valNameLen))
+           && isInRegion pos (A.Region (A.Position sr 0) (A.Position sr valNameLen))
          )
 
 
@@ -1739,7 +1698,7 @@ findElementInType pos type_ =
         Src.TLambda arg ret ->
           findElementInType pos arg <|> findElementInType pos ret
 
-        Src.TVar name ->
+        Src.TVar _ ->
           Nothing
 
         Src.TType region name tlist ->
@@ -1752,7 +1711,7 @@ findElementInType pos type_ =
             then Just (A.At region (ETypeQual qual name))
             else foldr (\a acc -> findElementInType pos a <|> acc) Nothing tlist
 
-        Src.TRecord fields extRecord ->
+        Src.TRecord fields _ ->
             foldr (\a acc -> findElementInType pos (snd a) <|> acc) Nothing fields
 
         Src.TUnit ->
@@ -1928,7 +1887,7 @@ findElementInExpr pos defs patterns expr =
 
                       inType = findElementInType pos Control.Monad.=<< t
                   in
-                  onName <|> inPatterns <|> inExpr <|> inType <|> acc
+                  onName <|> onNameInType <|> inPatterns <|> inExpr <|> inType <|> acc
 
                 Src.Destruct p e ->
                   if isInRegion pos (A.toRegion p) then
@@ -1957,7 +1916,7 @@ findElementInExpr pos defs patterns expr =
           Nothing
           bs
 
-    Src.Accessor field ->
+    Src.Accessor _ ->
       Nothing
 
     Src.Access record field ->
@@ -1987,7 +1946,7 @@ findElementInExpr pos defs patterns expr =
 
     Src.Record fields ->
       foldr
-        (\(field, value) acc ->
+        (\(_, value) acc ->
           if isInRegion pos (A.toRegion value) then
             findElementInExpr pos defs patterns value
           else
@@ -2150,11 +2109,6 @@ findReferences style state filePath position =
           BW.withScope $ \scope ->
             Stuff.withRootLock root (Details.load style scope root)
 
-        localSrc <-
-          case Details._outline details of
-            Details.ValidApp _ -> loadSrcModuleByPath state filePath
-            Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
-
         (modulePath, src, _, found) <- findDefinitionHelp details root state filePath position
 
         Task.io $ findReferencesHelp (RefsEnv state root details) modulePath src found
@@ -2189,7 +2143,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
             (return $ Map.singleton modulePath local)
             (importersOf details (Src.getName defSrc))
 
-    FoundAlias value@(Src.Alias (A.At region name) _ _) ->
+    FoundAlias (Src.Alias (A.At region name) _ _) ->
       do  let local =
                 region : findNameInModuleTypes name defSrc
                 ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
@@ -2322,7 +2276,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
 
                         imported =
                           case maybeImport of
-                            Just import_@(Src.Import _ alias _) ->
+                            Just import_ ->
                               if isInfixExposed import_ name then
                                 infixInModule name src
 
@@ -2553,26 +2507,13 @@ loadPkgModuleByPath state pkgName filePath =
           return module_
 
 
-isLowVarExposed :: Src.Import -> Name -> Bool
-isLowVarExposed (Src.Import _ _ Src.Open) name = True
-isLowVarExposed (Src.Import _ _ (Src.Explicit exposing)) name =
-  any
-    (\exposing_ ->
-      case exposing_ of
-        Src.Lower (A.At _ name_) -> name == name_
-        Src.Upper _ _ -> False
-        Src.Operator _ _ -> False
-    )
-    exposing
-
-
 isInfixExposed :: Src.Import -> Name -> Bool
-isInfixExposed (Src.Import _ _ Src.Open) name = True
+isInfixExposed (Src.Import _ _ Src.Open) _ = True
 isInfixExposed (Src.Import _ _ (Src.Explicit exposing)) name =
   any
     (\exposing_ ->
       case exposing_ of
-        Src.Lower (A.At _ name_) -> False
+        Src.Lower (A.At _ _) -> False
         Src.Upper _ _ -> False
         Src.Operator _ name_ -> name == name_
     )
@@ -2687,8 +2628,8 @@ varInExpr name regions rootExpr =
         List.foldl
           (\a (A.At _ def_) ->
             case def_ of
-              Src.Define (A.At _ name_) _ expr_ _ -> varInExpr name a expr_
-              Src.Destruct pattern expr_ -> varInExpr name a expr_
+              Src.Define (A.At _ _) _ expr_ _ -> varInExpr name a expr_
+              Src.Destruct _ expr_ -> varInExpr name a expr_
           )
           (varInExpr name regions expr)
           defs
@@ -2719,7 +2660,7 @@ varQualInExpr p n rs (A.At r e) =
     Src.Str _                 -> rs
     Src.Int _                 -> rs
     Src.Float _               -> rs
-    Src.Var _ varName         -> rs
+    Src.Var _ _               -> rs
     Src.VarQual _ prefix name -> if prefix == p && name == n then r : rs else rs
     Src.List exprs            -> List.foldl (varQualInExpr p n) rs exprs
     Src.Op _                  -> rs
@@ -2766,7 +2707,7 @@ varQualInExpr p n rs (A.At r e) =
         fields
 
     Src.Record fields ->
-        List.foldl (\rs1 (_, field) -> varQualInExpr p n rs field) rs fields
+        List.foldl (\rs1 (_, field) -> varQualInExpr p n rs1 field) rs fields
 
     Src.Unit         -> rs
     Src.Tuple a b cs -> List.foldl (varQualInExpr p n) rs (a : b : cs)
@@ -2774,12 +2715,12 @@ varQualInExpr p n rs (A.At r e) =
 
 
 infixInModule :: Name -> Src.Module -> [A.Region]
-infixInModule name srcMod@(Src.Module _ _ _ imports values _ _ _ _) =
-    List.concatMap
-      (\(A.At _ (Src.Value _ _ expr _)) ->
-        infixInExpr name [] expr
-      )
-      values
+infixInModule name (Src.Module _ _ _ _ values _ _ _ _) =
+  List.concatMap
+    (\(A.At _ (Src.Value _ _ expr _)) ->
+      infixInExpr name [] expr
+    )
+    values
 
 
 infixInExpr :: Name -> [A.Region] -> Src.Expr -> [A.Region]
@@ -2806,7 +2747,7 @@ infixInExpr n rs (A.At r e) =
         (infixInExpr n rs expr)
         exprsAndNames
 
-    Src.Lambda patterns expr -> infixInExpr n rs expr
+    Src.Lambda _ expr -> infixInExpr n rs expr
 
     Src.Call expr exprs ->
       List.foldl (infixInExpr n) (infixInExpr n rs expr) exprs
@@ -2823,8 +2764,8 @@ infixInExpr n rs (A.At r e) =
       List.foldl
         (\rs1 (A.At _ def_) ->
           case def_ of
-            Src.Define (A.At _ name_) _ expr_ _ -> infixInExpr n rs1 expr_
-            Src.Destruct pattern expr_ -> infixInExpr n rs1 expr_
+            Src.Define (A.At _ _) _ expr_ _ -> infixInExpr n rs1 expr_
+            Src.Destruct _ expr_ -> infixInExpr n rs1 expr_
         )
         (infixInExpr n rs expr)
         defs
@@ -2875,10 +2816,10 @@ findQualNameInType p n tipe =
     Src.TLambda arg ret ->
       findQualNameInType p n (A.toValue arg) ++ findQualNameInType p n (A.toValue ret)
 
-    Src.TVar name ->
+    Src.TVar _ ->
       []
 
-    Src.TType region _ tlist ->
+    Src.TType _ _ tlist ->
       concatMap (findQualNameInType p n . A.toValue) tlist
 
     Src.TTypeQual region prefix name tlist ->
@@ -2887,7 +2828,7 @@ findQualNameInType p n tipe =
       else
         concatMap (findQualNameInType p n . A.toValue) tlist
 
-    Src.TRecord fields extRecord ->
+    Src.TRecord fields _ ->
       concatMap (\a -> findQualNameInType p n (A.toValue (snd a))) fields
 
     Src.TUnit ->
@@ -2926,7 +2867,7 @@ findNameInType n tipe =
     Src.TLambda arg ret ->
       findNameInType n (A.toValue arg) ++ findNameInType n (A.toValue ret)
 
-    Src.TVar name ->
+    Src.TVar _ ->
       []
 
     Src.TType region name tlist ->
@@ -2938,7 +2879,7 @@ findNameInType n tipe =
     Src.TTypeQual _ _ _ tlist ->
       concatMap (findNameInType n . A.toValue) tlist
 
-    Src.TRecord fields extRecord ->
+    Src.TRecord fields _ ->
       concatMap (\a -> findNameInType n $ A.toValue $ snd a) fields
 
     Src.TUnit ->
@@ -2962,7 +2903,7 @@ findTypeInExprHelp f found (A.At _ e) =
         Src.Str _ -> found
         Src.Int _ -> found
         Src.Float _ -> found
-        Src.Var _ varName -> found
+        Src.Var _ _ -> found
         Src.VarQual _ _ _ -> found
         Src.List exprs -> List.foldl (findTypeInExprHelp f) found exprs
         Src.Op _ -> found
@@ -2972,7 +2913,7 @@ findTypeInExprHelp f found (A.At _ e) =
             (\acc (expr_, _) -> findTypeInExprHelp f acc expr_)
             (findTypeInExprHelp f found expr)
             exprsAndNames
-        Src.Lambda patterns expr -> findTypeInExprHelp f found expr
+        Src.Lambda _ expr -> findTypeInExprHelp f found expr
         Src.Call expr exprs ->
           List.foldl
             (findTypeInExprHelp f)
@@ -3003,7 +2944,7 @@ findTypeInExprHelp f found (A.At _ e) =
 
         Src.Case expr branches ->
           List.foldl
-            (\acc (pattern, branchExpr) ->
+            (\acc (_, branchExpr) ->
               findTypeInExprHelp f acc branchExpr
             )
             (findTypeInExprHelp f found expr)
@@ -3028,7 +2969,7 @@ getPackageCurrentlyUsedOrLatestVersion :: FilePath -> Pkg.Name -> IO (Maybe Vers
 getPackageCurrentlyUsedOrLatestVersion rootDir packageName =
   do  eitherOutline <- Outline.read rootDir
       case eitherOutline of
-        Left err -> getPackageNewestVersionFromRegistry packageName
+        Left _ -> getPackageNewestVersionFromRegistry packageName
 
         Right (Outline.App appOutline) ->
           let maybeLocal =
@@ -3039,12 +2980,13 @@ getPackageCurrentlyUsedOrLatestVersion rootDir packageName =
           in
           case maybeLocal of
             Nothing -> getPackageNewestVersionFromRegistry packageName
-            Just found -> pure maybeLocal
+            Just _ -> pure maybeLocal
 
         Right (Outline.Pkg _) ->
           getPackageNewestVersionFromRegistry packageName
 
 
+getPackageNewestVersionFromRegistry :: Pkg.Name -> IO (Maybe Version.Version)
 getPackageNewestVersionFromRegistry packageName =
   do  packageCache <- Stuff.getPackageCache
       maybeRegistry <- Deps.Registry.read packageCache
@@ -3091,23 +3033,21 @@ diagnosticsExitToReport exit =
 
 diagnostics ::
   Reporting.Style
-  -> State
   -> FilePath
-  -> IO (Either DiagnosticsExit [(FilePath, Int, [Reporting.Report.Report])])
-diagnostics style state filePath =
+  -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
+diagnostics style filePath =
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
       case maybeRoot of
-        Just root -> diagnosticsHelp style root state filePath
+        Just root -> diagnosticsHelp style root filePath
         Nothing   -> return $ Left DiagnosticsExitNoRoot
 
 
 diagnosticsHelp ::
-  Reporting.Style ->
-  FilePath ->
-  State ->
-  FilePath ->
-  IO (Either DiagnosticsExit [(FilePath, Int, [Reporting.Report.Report])])
-diagnosticsHelp style root state filePath =
+  Reporting.Style
+  -> FilePath
+  -> FilePath
+  -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
+diagnosticsHelp style root filePath =
   do  files <- findElmFilesInSourceDirs root
                  & fmap (filter (\a -> a /= filePath))
 
@@ -3127,74 +3067,29 @@ diagnosticsHelp style root state filePath =
                   return (buildResult, details)
 
 
-      case result of
-        Right (artifacts, details) -> do
-           return $ Right []
+      return $ case result of
+        Right _ ->
+          Right Map.empty
 
-        Left (DiagnosticsExitBadBuild buildProblem) -> do
+        Left (DiagnosticsExitBadBuild buildProblem) ->
           case Reporting.Exit.toBuildProblemReport buildProblem of
-            (Reporting.Exit.Help.CompilerReport _ e es) ->
-              return $ Right $ map
-                (\(Reporting.Error.Module name path _ source err) ->
-                  (
-                    path,
-                    1,
-                    Data.NonEmptyList.toList $
+            Reporting.Exit.Help.CompilerReport _ e es ->
+              Right $ List.foldr
+                (\(Reporting.Error.Module _ path _ source err) acc ->
+                  Map.insert path
+                    (Data.NonEmptyList.toList $
                       Reporting.Error.toReportsForLs (Code.toSource source) err
-                  )
+                    )
+                    acc
                 )
+                Map.empty
                 (e : es)
 
             _ ->
-              return $ Left $ DiagnosticsExitBadBuild buildProblem
+              Left $ DiagnosticsExitBadBuild buildProblem
 
         Left exit  ->
-              return $ Left exit
-
-
-showArtifacts artifacts =
-  do  x <- mapM showModule (Build._modules artifacts)
-
-      return ("_name: " ++ Pkg.toChars (Build._name artifacts) ++
-       "\n_artifacts: { _name: " ++ Pkg.toChars (Build._name artifacts) ++
-       -- ", _deps: [" ++ List.intercalate ", " (map showDep (Map.toList (Build._deps artifacts))) ++ "]" ++
-       -- ", _roots: [" ++ List.intercalate ", " (map showRoot (Data.NonEmptyList.toList (Build._roots artifacts))) ++ "]" ++
-       ", _modules: [" ++ List.intercalate ", " (x) ++ "]" ++
-       " }")
-
--- showDep :: (ModuleName.Canonical, I.DependencyInterface) -> String
-showDep (ModuleName.Canonical pkg name, _) = Pkg.toChars pkg ++ " - " ++ ModuleName.toChars name
-
-showRoot :: Build.Root -> String
-showRoot root = case root of
-  Build.Inside name -> "Inside(" ++ ModuleName.toChars name ++ ")"
-  Build.Outside name _ _ -> "Outside(" ++ ModuleName.toChars name ++ ")"
-
-showModule :: Build.Module -> IO String
-showModule m = case m of
-  Build.Fresh name interface _ ->
-    return $
-      "Fresh(" ++ ModuleName.toChars name ++ ")" ++ "\n" ++
-      "  interface: \n" ++
-      "    _values: [" ++
-        List.intercalate ", " (map (\(a, _) -> Name.toChars a) (Map.toList (Interface._values interface))) ++
-      "]" ++ "\n" ++
-      "\n"
-
-  Build.Cached name _ cached ->
-    do  interface <- Control.Concurrent.MVar.readMVar cached
-        case interface of
-          Build.Unneeded ->
-            return $ "Cached(" ++ ModuleName.toChars name ++ "): " ++ "Unneeded\n"
-          Build.Loaded interface_ ->
-            return $ "Cached(" ++ ModuleName.toChars name ++ ")\n" ++
-              "  interface: \n" ++
-              "    _values: [" ++
-                List.intercalate ", " (map (\(a, _) -> Name.toChars a) (Map.toList (Interface._values interface_))) ++
-              "]" ++ "\n"
-
-          Build.Corrupted ->
-            return $ "Cached(" ++ ModuleName.toChars name ++ "): " ++ "Corrupted\n"
+              Left exit
 
 
 findFilesRecursive :: FilePath -> IO [FilePath]
@@ -3231,13 +3126,12 @@ sourceDirs :: FilePath -> Outline.Outline -> IO [AbsoluteSrcDir]
 sourceDirs root outline =
   case outline of
     Outline.App app ->
-      do  srcDirs <- traverse (toAbsoluteSrcDir root)
-                       (Data.NonEmptyList.toList (Outline._app_source_dirs app))
-          return $ srcDirs
+      traverse (toAbsoluteSrcDir root) $
+        Data.NonEmptyList.toList (Outline._app_source_dirs app)
 
-    Outline.Pkg pkg ->
-      do  srcDir <- toAbsoluteSrcDir root (Outline.RelativeSrcDir "src")
-          return [srcDir]
+    Outline.Pkg _ ->
+      fmap List.singleton $
+        toAbsoluteSrcDir root (Outline.RelativeSrcDir "src")
 
 
 
@@ -3280,16 +3174,11 @@ getSymbols style state filePath =
           BW.withScope $ \scope ->
             Stuff.withRootLock root (Details.load style scope root)
 
-        getSymbolsHelp details root state filePath
+        getSymbolsHelp details state filePath
 
 
-getSymbolsHelp ::
-  Details.Details
-  -> FilePath
-  -> State
-  -> FilePath
-  -> Task.Task DefinitionExit [SymbolInfo]
-getSymbolsHelp details root state filePath =
+getSymbolsHelp :: Details.Details -> State -> FilePath -> Task.Task DefinitionExit [SymbolInfo]
+getSymbolsHelp details state filePath =
   Task.eio id $ LsReporting.trackDocumentSymbol $ Task.run $
   do  src <-
         case Details._outline details of
@@ -3308,7 +3197,7 @@ getSymbolsHelp details root state filePath =
                   (\(A.At region (Src.Union (A.At nameRegion name) _ variants)) ->
                     SymbolInfo name 10 region nameRegion (
                       map
-                        (\(a, type_) ->
+                        (\(a, _) ->
                           SymbolInfo (A.toValue a) 22 (A.toRegion a) (A.toRegion a) []
                         )
                         variants
