@@ -223,31 +223,8 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right (version, filePath, text) ->
-              do  Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
-                    return $ Map.insert filePath (BS_UTF8.fromString text) a
-
-                  style <- Reporting.languageServer
-                  diagnosticsResult <- diagnostics style state filePath
-
-                  case diagnosticsResult of
-                    Left err ->
-                      showMessage MessageTypeError $ Reporting.Exit.toString $
-                        diagnosticsExitToReport err
-
-                    Right stuffs ->
-                      do  Control.Concurrent.MVar.modifyMVar_ (_prevPublishedDiagnosticsFiles state) $
-                            \prev ->
-                              do  let diff = List.filter (\a -> List.all (\(n, _, _) -> n /= a) stuffs) prev
-                                  mapM_ (\a -> publishReportDiagnostic a 1 []) diff
-
-                                  return (map (\(a,_,_) -> a) stuffs)
-
-                          mapM_
-                            (\(reportsFilePath, i, reports) ->
-                              publishReportDiagnostic reportsFilePath i reports
-                            )
-                            stuffs
-
+              Control.Concurrent.MVar.modifyMVar_ (_changedFiles state) $ \a ->
+                return $ Map.insert filePath (BS_UTF8.fromString text) a
 
     "textDocument/didSave" ->
       do  let result =
