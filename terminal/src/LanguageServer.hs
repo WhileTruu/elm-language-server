@@ -204,9 +204,9 @@ handleMessage state method body =
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right filePath ->
+            Right savedFilePath ->
               do  style <- Reporting.languageServer
-                  diagnosticsResult <- diagnostics style filePath
+                  diagnosticsResult <- diagnostics style savedFilePath
 
                   case diagnosticsResult of
                     Left err ->
@@ -215,15 +215,15 @@ handleMessage state method body =
 
                     Right reportsMap ->
                       do  let mvar = _prevPublishedDiagnosticsFiles state
-                          prev <- Control.Concurrent.MVar.takeMVar mvar
-                          let new = Map.keysSet reportsMap
-                          Control.Concurrent.MVar.putMVar mvar new
+                          fixed <- Control.Concurrent.MVar.modifyMVar mvar $
+                            \prev ->
+                              do  let new = Map.keysSet reportsMap
+                                  let diff = Set.difference prev new
+                                  return (new, diff)
 
-                          let diff = Set.difference prev new
-                          mapM_ (\a -> publishReportDiagnostic a 1 []) diff
+                          mapM_ (\a -> publishReportDiagnostic a 1 []) fixed
                           Control.Monad.forM_ (Map.toList reportsMap) $
-                            \(reportsFilePath, reports) ->
-                               publishReportDiagnostic reportsFilePath 1 reports
+                            \(path, reports) -> publishReportDiagnostic path 1 reports
 
     "textDocument/didClose" ->
       do  let result =
