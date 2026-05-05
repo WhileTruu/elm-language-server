@@ -58,7 +58,7 @@ data Style
   = Silent
   | Json
   | Terminal (MVar ())
-  | LanguageServer (MVar ())
+  | LanguageServer
 
 
 silent :: Style
@@ -76,9 +76,9 @@ terminal =
   Terminal <$> newMVar ()
 
 
-languageServer :: IO Style
+languageServer :: Style
 languageServer =
-  LanguageServer <$> newMVar ()
+  LanguageServer
 
 
 -- ATTEMPT
@@ -205,15 +205,13 @@ trackDetails style callback =
           writeChan chan Nothing
           return answer
 
-    LanguageServer mvar ->
+    LanguageServer ->
       do  chan <- newChan
 
           _ <- forkIO $
-            do  takeMVar mvar
-                sendCreateWorkDoneProgress "details"
+            do  sendCreateWorkDoneProgress "details"
                 sendProgressBegin "details" "Verifying dependencies..."
                 languageServerDetailsLoop chan (DState 0 0 0 0 0 0 0)
-                putMVar mvar ()
 
           answer <- callback (Key (writeChan chan . Just))
           writeChan chan Nothing
@@ -417,16 +415,13 @@ trackBuild style callback =
           writeChan chan (Right result)
           return result
 
-    LanguageServer mvar ->
+    LanguageServer ->
       do  chan <- newChan
 
           _ <- forkIO $
-            do  takeMVar mvar
-
-                sendCreateWorkDoneProgress "build"
+            do  sendCreateWorkDoneProgress "build"
                 sendProgressBegin "build" "Compiling"
                 languageServerBuildLoop chan 0
-                putMVar mvar ()
 
           result <- callback (Key (writeChan chan . Left))
           writeChan chan (Right result)
