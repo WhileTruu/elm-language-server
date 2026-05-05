@@ -205,8 +205,7 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right savedFilePath ->
-              do  style <- Reporting.languageServer
-                  diagnosticsResult <- diagnostics style savedFilePath
+              do  diagnosticsResult <- diagnostics savedFilePath
 
                   case diagnosticsResult of
                     Left err ->
@@ -299,8 +298,7 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right (requestID, filePath, position) ->
-              do  style <- Reporting.languageServer
-                  definitionResult <- findDefinition style state filePath position
+              do  definitionResult <- findDefinition state filePath position
 
                   case definitionResult of
                     Right (definitionFilePath, _, _, A.At region _) ->
@@ -336,8 +334,7 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right (requestID, filePath, position) ->
-              do  style <- Reporting.languageServer
-                  referencesResult <- findReferences style state filePath position
+              do  referencesResult <- findReferences state filePath position
 
                   case referencesResult of
                     Right references ->
@@ -377,8 +374,7 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right (requestID, filePath, position) ->
-              do  style <- Reporting.languageServer
-                  maybeTarget <- findDefinition style state filePath position
+              do  maybeTarget <- findDefinition state filePath position
                   case maybeTarget of
                     Right (_, _, element, _) ->
                       do  respond requestID $
@@ -417,8 +413,7 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right (requestID, filePath, pos, newName) ->
-              do  style <- Reporting.languageServer
-                  referencesResult <- findReferences style state filePath pos
+              do  referencesResult <- findReferences state filePath pos
 
                   case referencesResult of
                     Right references ->
@@ -509,8 +504,7 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right (requestID, filePath) ->
-              do  style <- Reporting.languageServer
-                  symbolsResult <- getSymbols style state filePath
+              do  symbolsResult <- getSymbols state filePath
 
                   case symbolsResult of
                     Right symbols ->
@@ -889,14 +883,14 @@ data Found_
 
 
 findDefinition ::
-  Reporting.Style
-  -> State
+  State
   -> FilePath
   -> A.Position
   -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
-findDefinition style state filePath position =
+findDefinition state filePath position =
   Task.run $
-    do  root <- Task.mio DefinitionExitNoRoot $
+    do  let style = Reporting.languageServer
+        root <- Task.mio DefinitionExitNoRoot $
            Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
         details <- Task.eio DefinitionExitBadDetails $
           BW.withScope $ \scope ->
@@ -2093,12 +2087,12 @@ data RefsEnv =
 
 
 findReferences ::
-  Reporting.Style
-  -> State
+  State
   -> FilePath
   -> A.Position
   -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
-findReferences style state filePath position =
+findReferences state filePath position =
+  let style = Reporting.languageServer in
   Task.run $
     do  root <- Task.mio DefinitionExitNoRoot $
            Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
@@ -3028,24 +3022,21 @@ diagnosticsExitToReport exit =
 
 
 
-diagnostics ::
-  Reporting.Style
-  -> FilePath
-  -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
-diagnostics style filePath =
+diagnostics :: FilePath -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
+diagnostics filePath =
   do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
       case maybeRoot of
-        Just root -> diagnosticsHelp style root filePath
+        Just root -> diagnosticsHelp root filePath
         Nothing   -> return $ Left DiagnosticsExitNoRoot
 
 
 diagnosticsHelp ::
-  Reporting.Style
-  -> FilePath
+  FilePath
   -> FilePath
   -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
-diagnosticsHelp style root filePath =
-  do  files <- findElmFilesInSourceDirs root
+diagnosticsHelp root filePath =
+  do  let style = Reporting.languageServer
+      files <- findElmFilesInSourceDirs root
                  & fmap (filter (\a -> a /= filePath))
 
       result <-
@@ -3158,12 +3149,9 @@ addRelative (AbsoluteSrcDir srcDir) path =
 -- SYMBOLS
 
 
-getSymbols ::
-  Reporting.Style
-  -> State
-  -> FilePath
-  -> IO (Either DefinitionExit [SymbolInfo])
-getSymbols style state filePath =
+getSymbols :: State -> FilePath -> IO (Either DefinitionExit [SymbolInfo])
+getSymbols state filePath =
+  let style = Reporting.languageServer in
   Task.run $
     do  root <- Task.mio DefinitionExitNoRoot $
            Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
