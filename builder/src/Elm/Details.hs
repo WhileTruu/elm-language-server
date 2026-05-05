@@ -11,6 +11,7 @@ module Elm.Details
   , loadInterfaces
   , verifyInstall
   , downloadPackage
+  , generate
   )
   where
 

@@ -906,12 +906,9 @@ findDefinition ::
   -> IO (Either DefinitionExit (FilePath, Src.Module, Element, Found))
 findDefinition state filePath position =
   Task.run $
-    do  let style = Reporting.languageServer
-        root <- Task.mio DefinitionExitNoRoot $
+    do  root <- Task.mio DefinitionExitNoRoot $
            Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
-        details <- Task.eio DefinitionExitBadDetails $
-          BW.withScope $ \scope ->
-            Stuff.withRootLock root (Details.load style scope root)
+        details <- Task.eio DefinitionExitBadDetails $ loadDetails root
 
         findDefinitionHelp details root state filePath position
 
@@ -2109,13 +2106,10 @@ findReferences ::
   -> A.Position
   -> IO (Either DefinitionExit (Map.Map FilePath [A.Region]))
 findReferences state filePath position =
-  let style = Reporting.languageServer in
   Task.run $
     do  root <- Task.mio DefinitionExitNoRoot $
            Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
-        details <- Task.eio DefinitionExitBadDetails $
-          BW.withScope $ \scope ->
-            Stuff.withRootLock root (Details.load style scope root)
+        details <- Task.eio DefinitionExitBadDetails $ loadDetails root
 
         (modulePath, src, _, found) <- findDefinitionHelp details root state filePath position
 
@@ -3052,24 +3046,16 @@ diagnosticsHelp ::
   -> FilePath
   -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
 diagnosticsHelp root filePath =
-  do  let style = Reporting.languageServer
-      files <- findElmFilesInSourceDirs root
-                 & fmap (filter (\a -> a /= filePath))
+  let style = Reporting.languageServer in
+  do  files <- fmap (filter (\a -> a /= filePath)) $ findElmFilesInSourceDirs root
 
       result <-
-        Dir.withCurrentDirectory root $
-          BW.withScope $ \scope -> Stuff.withRootLock root $
-            Task.run $
-              do  details <- Task.eio DiagnosticsExitBadDetails $
-                               Details.load style scope root
+        Dir.withCurrentDirectory root $ Task.run $
+          do  details <- Task.eio DiagnosticsExitBadDetails $ loadDetails root
+              buildResult <- Task.eio DiagnosticsExitBadBuild $
+                Build.fromPaths style root details (Data.NonEmptyList.List filePath files)
 
-                  buildResult <- Task.eio DiagnosticsExitBadBuild $
-                    Build.fromPaths style
-                      root
-                      details
-                      (Data.NonEmptyList.List filePath files)
-
-                  return (buildResult, details)
+              return (buildResult, details)
 
 
       return $ case result of
@@ -3168,13 +3154,11 @@ addRelative (AbsoluteSrcDir srcDir) path =
 
 getSymbols :: State -> FilePath -> IO (Either DefinitionExit [SymbolInfo])
 getSymbols state filePath =
-  let style = Reporting.languageServer in
   Task.run $
     do  root <- Task.mio DefinitionExitNoRoot $
            Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
         details <- Task.eio DefinitionExitBadDetails $
-          BW.withScope $ \scope ->
-            Stuff.withRootLock root (Details.load style scope root)
+          loadDetails root
 
         getSymbolsHelp details state filePath
 
@@ -3253,3 +3237,24 @@ symbolInfoToJson sym =
     , "kind" Aeson..= (_symbol_kind sym :: Int)
     , "children" Aeson..= map symbolInfoToJson (_symbol_children sym)
     ]
+
+
+
+-- UTILS
+
+
+loadDetails :: FilePath -> IO (Either Reporting.Exit.Details Details.Details)
+loadDetails root =
+  do  newTime <- File.getTime (root </> "elm.json")
+      maybeDetails <- File.readBinary (Stuff.details root)
+      case maybeDetails of
+        Nothing ->
+          BW.withScope $ \scope -> Stuff.withRootLock root $
+            Details.generate Reporting.languageServer scope root newTime
+
+        Just details@(Details.Details oldTime _ buildID _ _ _) ->
+          if oldTime == newTime then
+            return (Right details { Details._buildID = buildID + 1 })
+          else
+            BW.withScope $ \scope -> Stuff.withRootLock root $
+              Details.generate Reporting.languageServer scope root newTime
