@@ -64,15 +64,13 @@ import qualified BackgroundWriter as BW
 import qualified Http
 import LanguageServer.Reporting as LsReporting
 
-import Data.IORef (IORef)
-import qualified Data.IORef as IORef
-
 data State =
   State
     { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
     , _prevPublishedDiagnosticsFiles :: Control.Concurrent.MVar.MVar (Set.Set FilePath)
+    , _pendingDiagnostics :: Control.Concurrent.MVar.MVar (Maybe FilePath)
+    , _diagnosticsSignal :: Control.Concurrent.MVar.MVar ()
     , _elmFormat :: Control.Concurrent.MVar.MVar (Maybe FilePath)
-    , _diagnosticsDebounceCounter :: IORef Int
     }
 
 
@@ -80,9 +78,13 @@ run :: IO ()
 run =
   do  changedFiles <- Control.Concurrent.MVar.newMVar Map.empty
       prevPublishedDiagnosticsFiles <- Control.Concurrent.MVar.newMVar Set.empty
-      elmFormat <- Control.Concurrent.MVar.newMVar Nothing
-      diagnosticsDebounceCounter <- IORef.newIORef (0 :: Int)
-      runLoop $ State changedFiles prevPublishedDiagnosticsFiles elmFormat diagnosticsDebounceCounter
+      pd <- Control.Concurrent.MVar.newMVar Nothing
+      ds <- Control.Concurrent.MVar.newEmptyMVar
+      fmt <- Control.Concurrent.MVar.newMVar Nothing
+      let state = State changedFiles prevPublishedDiagnosticsFiles pd ds fmt
+
+      _ <- Control.Concurrent.forkIO (diagnosticsLoop state)
+      runLoop state
 
 
 runLoop :: State -> IO ()
@@ -206,40 +208,8 @@ handleMessage state method body =
                 ) =<< Aeson.eitherDecode body
 
           case result of
-            Left err ->
-              putStrFlushErr $ "Error decoding JSON: " ++ err
-
-            Right savedFilePath ->
-              do  let counter = _diagnosticsDebounceCounter state
-
-                  current <- IORef.atomicModifyIORef' counter $ \n ->
-                     let n' = n + 1 in (n', n')
-                  _ <- Control.Concurrent.forkIO $
-                         do  Control.Concurrent.threadDelay 100000
-
-                             latest <- IORef.readIORef counter
-                             if latest == current then
-                               do  diagnosticsResult <- diagnostics savedFilePath
-
-                                   case diagnosticsResult of
-                                     Left err ->
-                                       showMessage MessageTypeError $ Reporting.Exit.toString $
-                                         diagnosticsExitToReport err
-
-                                     Right reportsMap ->
-                                       do  let mvar = _prevPublishedDiagnosticsFiles state
-                                           fixed <- Control.Concurrent.MVar.modifyMVar mvar $
-                                             \prev ->
-                                               do  let new = Map.keysSet reportsMap
-                                                   let diff = Set.difference prev new
-                                                   return (new, diff)
-
-                                           mapM_ (\a -> publishReportDiagnostic a 1 []) fixed
-                                           Control.Monad.forM_ (Map.toList reportsMap) $
-                                             \(path, reports) -> publishReportDiagnostic path 1 reports
-                              else
-                                return ()
-                  return ()
+            Left  err      -> putStrFlushErr $ "Error decoding JSON: " ++ err
+            Right filePath -> requestDiagnostics state filePath
 
     "textDocument/didClose" ->
       do  let result =
@@ -533,6 +503,51 @@ handleMessage state method body =
 
     unknownMethod ->
       putStrFlushErr $ "Unknown method: " ++ unknownMethod
+
+
+requestDiagnostics :: State -> FilePath -> IO ()
+requestDiagnostics state filePath =
+  do  Control.Concurrent.MVar.modifyMVar_ (_pendingDiagnostics state) $
+        \_ -> return (Just filePath)
+
+      _ <- Control.Concurrent.MVar.tryPutMVar (_diagnosticsSignal state) ()
+      return ()
+
+
+diagnosticsLoop :: State -> IO ()
+diagnosticsLoop state =
+  do  Control.Concurrent.MVar.takeMVar (_diagnosticsSignal state)
+      Control.Concurrent.threadDelay 100000
+      maybeFilePath <- Control.Concurrent.MVar.modifyMVar (_pendingDiagnostics state) $
+        \pending -> return (Nothing, pending)
+
+      case maybeFilePath of
+        Nothing -> return ()
+        Just filePath -> runDiagnostics state filePath
+
+      diagnosticsLoop state
+
+
+runDiagnostics :: State -> FilePath -> IO ()
+runDiagnostics state filePath =
+  do  diagnosticsResult <- diagnostics filePath
+
+      case diagnosticsResult of
+        Left err ->
+          showMessage MessageTypeError $ Reporting.Exit.toString $
+            diagnosticsExitToReport err
+
+        Right reportsMap ->
+          do  let mvar = _prevPublishedDiagnosticsFiles state
+              fixed <- Control.Concurrent.MVar.modifyMVar mvar $
+                \prev ->
+                  do  let new = Map.keysSet reportsMap
+                      let diff = Set.difference prev new
+                      return (new, diff)
+
+              mapM_ (\a -> publishReportDiagnostic a 1 []) fixed
+              Control.Monad.forM_ (Map.toList reportsMap) $
+                \(path, reports) -> publishReportDiagnostic path 1 reports
 
 
 putStrFlushErr :: String -> IO ()
