@@ -13,6 +13,7 @@ module LanguageServer
 import qualified Control.Monad
 import Control.Applicative ((<|>))
 import qualified Control.Concurrent.MVar
+import qualified Control.Concurrent
 import qualified Control.Exception as Exception
 import Data.Aeson ((.:), (.=))
 import qualified Data.Aeson as Aeson
@@ -205,24 +206,26 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right savedFilePath ->
-              do  diagnosticsResult <- diagnostics savedFilePath
+              do  _ <- Control.Concurrent.forkIO $
+                         do  diagnosticsResult <- diagnostics savedFilePath
 
-                  case diagnosticsResult of
-                    Left err ->
-                      showMessage MessageTypeError $ Reporting.Exit.toString $
-                        diagnosticsExitToReport err
+                             case diagnosticsResult of
+                               Left err ->
+                                 showMessage MessageTypeError $ Reporting.Exit.toString $
+                                   diagnosticsExitToReport err
 
-                    Right reportsMap ->
-                      do  let mvar = _prevPublishedDiagnosticsFiles state
-                          fixed <- Control.Concurrent.MVar.modifyMVar mvar $
-                            \prev ->
-                              do  let new = Map.keysSet reportsMap
-                                  let diff = Set.difference prev new
-                                  return (new, diff)
+                               Right reportsMap ->
+                                 do  let mvar = _prevPublishedDiagnosticsFiles state
+                                     fixed <- Control.Concurrent.MVar.modifyMVar mvar $
+                                       \prev ->
+                                         do  let new = Map.keysSet reportsMap
+                                             let diff = Set.difference prev new
+                                             return (new, diff)
 
-                          mapM_ (\a -> publishReportDiagnostic a 1 []) fixed
-                          Control.Monad.forM_ (Map.toList reportsMap) $
-                            \(path, reports) -> publishReportDiagnostic path 1 reports
+                                     mapM_ (\a -> publishReportDiagnostic a 1 []) fixed
+                                     Control.Monad.forM_ (Map.toList reportsMap) $
+                                       \(path, reports) -> publishReportDiagnostic path 1 reports
+                  return ()
 
     "textDocument/didClose" ->
       do  let result =
