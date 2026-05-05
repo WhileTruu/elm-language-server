@@ -64,12 +64,15 @@ import qualified BackgroundWriter as BW
 import qualified Http
 import LanguageServer.Reporting as LsReporting
 
+import Data.IORef (IORef)
+import qualified Data.IORef as IORef
 
 data State =
   State
     { _changedFiles :: Control.Concurrent.MVar.MVar (Map.Map FilePath BS.ByteString)
     , _prevPublishedDiagnosticsFiles :: Control.Concurrent.MVar.MVar (Set.Set FilePath)
     , _elmFormat :: Control.Concurrent.MVar.MVar (Maybe FilePath)
+    , _diagnosticsDebounceCounter :: IORef Int
     }
 
 
@@ -78,7 +81,8 @@ run =
   do  changedFiles <- Control.Concurrent.MVar.newMVar Map.empty
       prevPublishedDiagnosticsFiles <- Control.Concurrent.MVar.newMVar Set.empty
       elmFormat <- Control.Concurrent.MVar.newMVar Nothing
-      runLoop $ State changedFiles prevPublishedDiagnosticsFiles elmFormat
+      diagnosticsDebounceCounter <- IORef.newIORef (0 :: Int)
+      runLoop $ State changedFiles prevPublishedDiagnosticsFiles elmFormat diagnosticsDebounceCounter
 
 
 runLoop :: State -> IO ()
@@ -206,25 +210,35 @@ handleMessage state method body =
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
             Right savedFilePath ->
-              do  _ <- Control.Concurrent.forkIO $
-                         do  diagnosticsResult <- diagnostics savedFilePath
+              do  let counter = _diagnosticsDebounceCounter state
 
-                             case diagnosticsResult of
-                               Left err ->
-                                 showMessage MessageTypeError $ Reporting.Exit.toString $
-                                   diagnosticsExitToReport err
+                  current <- IORef.atomicModifyIORef' counter $ \n ->
+                     let n' = n + 1 in (n', n')
+                  _ <- Control.Concurrent.forkIO $
+                         do  Control.Concurrent.threadDelay 100000
 
-                               Right reportsMap ->
-                                 do  let mvar = _prevPublishedDiagnosticsFiles state
-                                     fixed <- Control.Concurrent.MVar.modifyMVar mvar $
-                                       \prev ->
-                                         do  let new = Map.keysSet reportsMap
-                                             let diff = Set.difference prev new
-                                             return (new, diff)
+                             latest <- IORef.readIORef counter
+                             if latest == current then
+                               do  diagnosticsResult <- diagnostics savedFilePath
 
-                                     mapM_ (\a -> publishReportDiagnostic a 1 []) fixed
-                                     Control.Monad.forM_ (Map.toList reportsMap) $
-                                       \(path, reports) -> publishReportDiagnostic path 1 reports
+                                   case diagnosticsResult of
+                                     Left err ->
+                                       showMessage MessageTypeError $ Reporting.Exit.toString $
+                                         diagnosticsExitToReport err
+
+                                     Right reportsMap ->
+                                       do  let mvar = _prevPublishedDiagnosticsFiles state
+                                           fixed <- Control.Concurrent.MVar.modifyMVar mvar $
+                                             \prev ->
+                                               do  let new = Map.keysSet reportsMap
+                                                   let diff = Set.difference prev new
+                                                   return (new, diff)
+
+                                           mapM_ (\a -> publishReportDiagnostic a 1 []) fixed
+                                           Control.Monad.forM_ (Map.toList reportsMap) $
+                                             \(path, reports) -> publishReportDiagnostic path 1 reports
+                              else
+                                return ()
                   return ()
 
     "textDocument/didClose" ->
