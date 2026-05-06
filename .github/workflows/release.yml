@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target.name }}
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            archive: elm-language-server-linux_arm64.tar.gz
+          - name: Linux x64
+            runner: ubuntu-24.04
+            archive: elm-language-server-linux_x86_64.tar.gz
+          - name: macOS Apple Silicon
+            runner: macos-15
+            archive: elm-language-server-macos_apple_silicon.tar.gz
+          - name: macOS Intel
+            runner: macos-15-intel
+            archive: elm-language-server-macos_x86_64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: Build binary
+        run: nix build .#elm-language-server
+
+      - name: Package archive
+        run: |
+          mkdir dist
+          cp result/bin/elm-language-server dist/elm-language-server
+          tar -C dist -czf "${{ matrix.target.archive }}" elm-language-server
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target.archive }}
+          path: ${{ matrix.target.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Attach assets to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*/*.tar.gz
