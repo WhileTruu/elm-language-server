@@ -123,7 +123,7 @@ handleMessage state method body =
             Left err ->
               putStrFlushErr $ "Error decoding JSON: " ++ err
 
-            Right (requestID, _rootPath, elmFormatPath) ->
+            Right (requestID, rootPath, elmFormatPath) ->
               do  elmFormat <- getElmFormat elmFormatPath
 
                   Control.Concurrent.MVar.modifyMVar_ (_elmFormat state) $
@@ -152,7 +152,9 @@ handleMessage state method body =
                             , "version" .= ("1.1.0" :: String)
                             ]
                           ]
+
                   respond requestID response
+                  requestDiagnostics state rootPath
 
     "initialized" ->
       return ()
@@ -209,7 +211,15 @@ handleMessage state method body =
 
           case result of
             Left  err      -> putStrFlushErr $ "Error decoding JSON: " ++ err
-            Right filePath -> requestDiagnostics state filePath
+            Right filePath ->
+              do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+
+                  case maybeRoot of
+                    Just root   -> requestDiagnostics state root
+                    Nothing ->
+                      showMessage MessageTypeError $ Reporting.Exit.toString $
+                        diagnosticsExitToReport (DiagnosticsExitNoRoot filePath)
+
 
     "textDocument/didClose" ->
       do  let result =
@@ -529,8 +539,8 @@ diagnosticsLoop state =
 
 
 runDiagnostics :: State -> FilePath -> IO ()
-runDiagnostics state filePath =
-  do  diagnosticsResult <- diagnostics filePath
+runDiagnostics state rootPath =
+  do  diagnosticsResult <- diagnostics rootPath
 
       case diagnosticsResult of
         Left err ->
@@ -3023,7 +3033,7 @@ getPackageNewestVersionFromRegistry packageName =
 
 
 data DiagnosticsExit
-  = DiagnosticsExitNoRoot
+  = DiagnosticsExitNoRoot FilePath
   | DiagnosticsExitBadDetails Reporting.Exit.Details
   | DiagnosticsExitBadBuild Reporting.Exit.BuildProblem
 
@@ -3031,8 +3041,8 @@ data DiagnosticsExit
 diagnosticsExitToReport :: DiagnosticsExit -> Reporting.Exit.Help.Report
 diagnosticsExitToReport exit =
   case exit of
-    DiagnosticsExitNoRoot ->
-      Reporting.Exit.Help.report "DIAGNOSTICS FOR WHAT?" Nothing
+    DiagnosticsExitNoRoot filePath ->
+      Reporting.Exit.Help.report ("DIAGNOSTICS FOR WHAT? - " ++ show filePath) Nothing
         "I cannot find an elm.json so I am not sure what you want diagnostics for."
         [ Reporting.Doc.reflow $
             "Elm packages always have an elm.json that says current the version number. If\
@@ -3046,56 +3056,46 @@ diagnosticsExitToReport exit =
       Reporting.Exit.toBuildProblemReport problem
 
 
-
-
 diagnostics :: FilePath -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
-diagnostics filePath =
-  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
-      case maybeRoot of
-        Just root -> diagnosticsHelp root filePath
-        Nothing   -> return $ Left DiagnosticsExitNoRoot
-
-
-diagnosticsHelp ::
-  FilePath
-  -> FilePath
-  -> IO (Either DiagnosticsExit (Map.Map FilePath [Reporting.Report.Report]))
-diagnosticsHelp root filePath =
+diagnostics root =
   let style = Reporting.languageServer in
-  do  files <- fmap (filter (\a -> a /= filePath)) $ findElmFilesInSourceDirs root
+  do  files <- findElmFilesInSourceDirs root
 
-      result <-
-        Dir.withCurrentDirectory root $ Task.run $
-          do  details <- Task.eio DiagnosticsExitBadDetails $ loadDetails root
-              buildResult <- Task.eio DiagnosticsExitBadBuild $
-                Build.fromPaths style root details (Data.NonEmptyList.List filePath files)
+      case files of
+        [] -> return $ Right Map.empty
+        x : xs ->
+          do  result <-
+                Dir.withCurrentDirectory root $ Task.run $
+                  do  details <- Task.eio DiagnosticsExitBadDetails $ loadDetails root
+                      buildResult <- Task.eio DiagnosticsExitBadBuild $
+                        Build.fromPaths style root details (Data.NonEmptyList.List x xs)
 
-              return (buildResult, details)
+                      return (buildResult, details)
 
 
-      return $ case result of
-        Right _ ->
-          Right Map.empty
+              return $ case result of
+                Right _ ->
+                  Right Map.empty
 
-        Left (DiagnosticsExitBadBuild buildProblem) ->
-          case Reporting.Exit.toBuildProblemReport buildProblem of
-            Reporting.Exit.Help.CompilerReport _ e es ->
-              Right $ List.foldr
-                (\(Reporting.Error.Module _ path _ source err) acc ->
-                  Map.insert path
-                    (Data.NonEmptyList.toList $
-                      Reporting.Error.toReportsForLs (Code.toSource source) err
-                    )
-                    acc
-                )
-                Map.empty
-                (e : es)
+                Left (DiagnosticsExitBadBuild buildProblem) ->
+                  case Reporting.Exit.toBuildProblemReport buildProblem of
+                    Reporting.Exit.Help.CompilerReport _ e es ->
+                      Right $ List.foldr
+                        (\(Reporting.Error.Module _ path _ source err) acc ->
+                          Map.insert path
+                            (Data.NonEmptyList.toList $
+                              Reporting.Error.toReportsForLs (Code.toSource source) err
+                            )
+                            acc
+                        )
+                        Map.empty
+                        (e : es)
 
-            _ ->
-              Left $ DiagnosticsExitBadBuild buildProblem
+                    _ ->
+                      Left $ DiagnosticsExitBadBuild buildProblem
 
-        Left exit  ->
-              Left exit
+                Left exit  ->
+                      Left exit
 
 
 findFilesRecursive :: FilePath -> IO [FilePath]
