@@ -26,9 +26,6 @@ jobs:
           - name: macOS Apple Silicon
             runner: macos-15
             archive: elm-language-server-macos_apple_silicon.tar.gz
-          - name: macOS Intel
-            runner: macos-15-intel
-            archive: elm-language-server-macos_x86_64.tar.gz
 
     steps:
       - uses: actions/checkout@v4
