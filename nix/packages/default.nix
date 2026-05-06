@@ -13,7 +13,7 @@ pkgs.haskell.packages.ghc96.override {
         patches = [];
         buildTools = drv.buildTools or [] ++ [makeWrapper];
 
-        description = "Fork of the elm compiler, repurposed for a language server.";
+        description = "A language server for the Elm programming language.";
         homepage = "https://github.com/WhileTruu/elm-language-server";
         license = lib.licenses.bsd3;
         maintainers = with lib.maintainers; [];
