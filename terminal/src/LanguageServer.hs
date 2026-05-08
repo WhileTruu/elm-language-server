@@ -646,7 +646,8 @@ respond idValue value =
   let
     header = "Content-Length: " ++ show (BSC.length content) ++ "\r\n\r\n"
     content = BSLC.toStrict $ Aeson.encode $ Aeson.object
-      [ "id" .= idValue
+      [ "jsonrpc" .= ("2.0" :: String)
+      , "id" .= idValue
       , "result" .= value
       ]
    in do
@@ -707,7 +708,8 @@ sendNotification method value =
   let
     header = "Content-Length: " ++ show (BSC.length content) ++ "\r\n\r\n"
     content = BSLC.toStrict $ Aeson.encode $ Aeson.object
-      [ "method" .= method
+      [ "jsonrpc" .= ("2.0" :: String)
+      , "method" .= method
       , "params" .= value
       ]
    in do
@@ -720,7 +722,8 @@ respondErr idValue message =
   let
     header = "Content-Length: " ++ show (BSC.length content) ++ "\r\n\r\n"
     content = BSLC.toStrict $ Aeson.encode $ Aeson.object
-      [ "id" Aeson..= idValue
+      [ "jsonrpc" Aeson..= ("2.0" :: String)
+      , "id" Aeson..= idValue
       , "error" Aeson..= Aeson.object
         [ "code" Aeson..= (-1 :: Int) -- FIXME: remove code?
         , "message" Aeson..= (message :: String)

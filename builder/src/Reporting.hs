@@ -641,7 +641,8 @@ sendNotification method value =
   let
     header = "Content-Length: " ++ show (BSC.length content) ++ "\r\n\r\n"
     content = BSLC.toStrict $ Aeson.encode $ Aeson.object
-      [ "method" .= method
+      [ "jsonrpc" .= ("2.0" :: String)
+      , "method" .= method
       , "params" .= value
       ]
    in do
