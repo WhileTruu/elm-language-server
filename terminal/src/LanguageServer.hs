@@ -923,7 +923,7 @@ data Found_
   | FoundInfix Src.Infix
   | FoundAlias Src.Alias
   | FoundUnion Src.Union
-  | FoundVariant (A.Located Name, [Src.Type])
+  | FoundVariant Src.Union (A.Located Name, [Src.Type])
   | FoundModuleName Name
 
 
@@ -1163,7 +1163,7 @@ findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns
                 acc
 
             (Src.Destruct pattern _) ->
-              fmap (\a -> A.At a (FoundPName expr name)) (findNameInPattern name pattern)
+              fmap (\a -> A.At a (FoundPName expr name)) (findLowVarInPattern name pattern)
         )
         Nothing
         defs
@@ -1172,7 +1172,7 @@ findDefinitionForLowVarLocally (Src.Module _ _ _ _ values _ _ _ _) defs patterns
       foldr
         (\(expr,p) acc ->
           fmap (\a -> A.At a (FoundPName expr name))
-            (findNameInPattern name p) <|> acc
+            (findLowVarInPattern name p) <|> acc
         )
         Nothing
         patterns
@@ -1313,11 +1313,11 @@ findDefinitionForCtorInModule name src =
 
     inUnions =
       foldr
-        (\(A.At _ (Src.Union (A.At _ _) _ variants)) acc ->
+        (\(A.At _ union@(Src.Union (A.At _ _) _ variants)) acc ->
           foldr
             (\a acc1 ->
               if A.toValue (fst a) == name
-                then Just (A.At (A.toRegion (fst a)) (FoundVariant a))
+                then Just (A.At (A.toRegion (fst a)) (FoundVariant union a))
                 else acc1
             )
             acc
@@ -1442,8 +1442,8 @@ findLowVarDefinitionNamed name (Src.Module _ _ _ _ values _ _ _ _) =
     values
 
 
-findNameInPattern :: Name -> Src.Pattern -> Maybe A.Region
-findNameInPattern name pattern =
+findLowVarInPattern :: Name -> Src.Pattern -> Maybe A.Region
+findLowVarInPattern name pattern =
   case A.toValue pattern of
     Src.PAnything -> Nothing
     Src.PVar n    -> if n == name then Just (A.toRegion pattern) else Nothing
@@ -1452,23 +1452,23 @@ findNameInPattern name pattern =
       foldr (\(A.At r n) acc -> if n == name then Just r else acc) Nothing ns
 
     Src.PAlias p (A.At r n) ->
-      if n == name then Just r else findNameInPattern name p
+      if n == name then Just r else findLowVarInPattern name p
 
     Src.PUnit -> Nothing
 
     Src.PTuple a b cs ->
-      foldr (\p acc -> findNameInPattern name p <|> acc) Nothing (a : b : cs)
+      foldr (\p acc -> findLowVarInPattern name p <|> acc) Nothing (a : b : cs)
 
     Src.PCtor _ _ ps ->
-      foldr (\p acc -> findNameInPattern name p <|> acc) Nothing ps
+      foldr (\p acc -> findLowVarInPattern name p <|> acc) Nothing ps
 
     Src.PCtorQual _ _ _ _ -> Nothing
 
     Src.PList ps ->
-      foldr (\p acc -> findNameInPattern name p <|> acc) Nothing ps
+      foldr (\p acc -> findLowVarInPattern name p <|> acc) Nothing ps
 
     Src.PCons hd tl ->
-      findNameInPattern name hd <|> findNameInPattern name tl
+      findLowVarInPattern name hd <|> findLowVarInPattern name tl
 
     Src.PChr _ -> Nothing
     Src.PStr _ -> Nothing
@@ -2141,7 +2141,10 @@ findReferences state filePath position =
 
         (modulePath, src, _, found) <- findDefinitionHelp details root state filePath position
 
-        Task.io $ findReferencesHelp (RefsEnv state root details) modulePath src found
+        refs <- Task.io $ findReferencesHelp (RefsEnv state root details) modulePath src found
+
+        return $
+          Map.map (List.sortOn (\(A.Region (A.Position start _) _) -> start)) refs
 
 
 findReferencesHelp :: RefsEnv -> FilePath -> Src.Module -> Found -> IO (Map.Map FilePath [A.Region])
@@ -2263,30 +2266,44 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
             (return $ Map.singleton modulePath local)
             (importersOf details (Src.getName defSrc))
 
-    FoundVariant (A.At _ name, _) ->
-      do  let local =
-                (A.toRegion found)
-                  : List.concatMap (findVarInValue name . A.toValue) (Src._values defSrc)
-                  ++ (findNameInExposing name (A.toValue (Src._exports defSrc))
-                        & maybe [] (\a -> [a])
-                     )
-          LsReporting.report key (RefsDone (length local))
-          foldr
-            (\a acc ->
-              do  loadResult <- loadSrcModule state details root a
+    FoundVariant (Src.Union (A.At _ uname) _ _) (A.At _ name, _) ->
+      let local =
+            (A.toRegion found)
+              : List.concatMap (findVarInValue name . A.toValue) (Src._values defSrc)
 
-                  case loadResult of
-                    Left _ -> acc -- ignore not found - deleted files included
+          exposed =
+            case A.toValue (Src._exports defSrc) of
+              Src.Open -> True
+              Src.Explicit exposedList ->
+                List.any
+                  (\a ->
+                    case a of
+                      Src.Upper (A.At _ name_) (Src.Public _) -> name_ == uname
+                      _ -> False
+                  )
+                  exposedList
+      in
+      if exposed then
+        do  LsReporting.report key (RefsDone (length local))
+            foldr
+              (\a acc ->
+                do  loadResult <- loadSrcModule state details root a
 
-                    Right (path, src) ->
-                      do  let imported =
-                                findReferencesForImportedVar (Src.getName defSrc) name src
+                    case loadResult of
+                      Left _ -> acc -- ignore not found - deleted files included
 
-                          LsReporting.report key (RefsDone (length imported))
-                          fmap (Map.insert path imported) acc
-            )
-            (return $ Map.singleton modulePath local)
-            (importersOf details (Src.getName defSrc))
+                      Right (path, src) ->
+                        do  let imported =
+                                  findReferencesForImportedVar (Src.getName defSrc) name src
+
+                            LsReporting.report key (RefsDone (length imported))
+                            fmap (Map.insert path imported) acc
+              )
+              (return $ Map.singleton modulePath local)
+              (importersOf details (Src.getName defSrc))
+      else
+        do  LsReporting.report key (RefsDone (length local))
+            return $ Map.singleton modulePath local
 
     FoundInfix (Src.Infix name _ _ _) ->
       do  let local = infixInModule name defSrc
@@ -2335,7 +2352,7 @@ findReferencesHelp (RefsEnv state root details) modulePath defSrc found =
         isFoundDef def =
           case A.toValue def of
             Src.Define _ _ _ _ -> False
-            Src.Destruct p _   -> Maybe.isJust (findNameInPattern name p)
+            Src.Destruct p _   -> Maybe.isJust (findLowVarInPattern name p)
       in
       return $ Map.singleton modulePath (A.toRegion found : varInExpr name [] exprWithoutFoundDef)
 
@@ -2565,11 +2582,14 @@ importersOf details targetModule =
 
 findVarInValue :: Name -> Src.Value -> [A.Region]
 findVarInValue name (Src.Value _ patterns expr _) =
-  -- Find out what this is about; the commit that added it says
-  -- "find modules correctly from inside packages"
-  if any (Maybe.isJust . findNameInPattern name) patterns
-    then []
-    else varInExpr name [] expr
+  -- A var cannot be found in a value where it's shadowed in patterns.
+  if any (Maybe.isJust . findLowVarInPattern name) patterns then
+    []
+  else
+    let
+      patternRegions = List.foldr (\a acc -> nameInPattern name acc a) [] patterns
+    in
+      varInExpr name patternRegions expr
 
 
 valueRegions :: A.Located Src.Value -> [A.Region]
@@ -2626,9 +2646,11 @@ varInExpr name regions rootExpr =
         exprsAndNames
 
     Src.Lambda patterns expr ->
-      if any (Maybe.isJust . findNameInPattern name) patterns
-        then regions
-        else varInExpr name regions expr
+      if any (Maybe.isJust . findLowVarInPattern name) patterns then
+        regions
+      else foldr (\p acc -> nameInPattern name acc p)
+        (varInExpr name regions expr)
+        patterns
 
     Src.Call func args -> List.foldl (varInExpr name) (varInExpr name regions func) args
 
@@ -2648,7 +2670,7 @@ varInExpr name regions rootExpr =
               case A.toValue a of
                 Src.Define (A.At _ name_) _ _ _ -> name == name_
                 Src.Destruct pattern _ ->
-                  Maybe.isJust (findNameInPattern name pattern)
+                  Maybe.isJust (findLowVarInPattern name pattern)
             )
           defs
       in
@@ -2658,18 +2680,24 @@ varInExpr name regions rootExpr =
         List.foldl
           (\a (A.At _ def_) ->
             case def_ of
-              Src.Define (A.At _ _) _ expr_ _ -> varInExpr name a expr_
-              Src.Destruct _ expr_ -> varInExpr name a expr_
+              Src.Define (A.At _ _) patterns expr_ _ ->
+                foldr (\p acc -> nameInPattern name acc p)
+                  (varInExpr name a expr_)
+                  patterns
+
+              Src.Destruct pattern expr_ ->
+                nameInPattern name (varInExpr name a expr_) pattern
           )
           (varInExpr name regions expr)
           defs
 
     Src.Case expr branches ->
-      if any (Maybe.isJust . findNameInPattern name . fst) branches
-        then regions
-        else List.foldl
-          (\a (_, x) ->
-            varInExpr name (varInExpr name a x) expr
+      if any (Maybe.isJust . findLowVarInPattern name . fst) branches then
+        regions
+      else
+        List.foldl
+          (\acc (pattern, branch) ->
+             varInExpr name (nameInPattern name acc pattern) branch
           )
           (varInExpr name regions expr)
           branches
@@ -2681,6 +2709,43 @@ varInExpr name regions rootExpr =
     Src.Unit            -> regions
     Src.Tuple a b cs    -> List.foldl (varInExpr name) regions (a : b : cs)
     Src.Shader _ _      -> regions
+
+
+nameInPattern :: Name -> [A.Region] -> Src.Pattern -> [A.Region]
+nameInPattern name regions pattern =
+  case A.toValue pattern of
+    Src.PAnything -> regions
+    Src.PVar n    -> if n == name then A.toRegion pattern : regions else regions
+
+    Src.PRecord ns ->
+      foldr (\(A.At r n) acc -> if n == name then r : acc else acc) regions ns
+
+    Src.PAlias p (A.At r n) ->
+      nameInPattern name (if n == name then r : regions else regions) p
+
+    Src.PUnit -> regions
+
+    Src.PTuple a b cs ->
+      foldr (\p acc -> nameInPattern name acc p) regions (a : b : cs)
+
+    Src.PCtor r n ps ->
+      foldr (\p acc -> nameInPattern name acc p)
+        (if n == name then r : regions else regions)
+        ps
+
+    Src.PCtorQual _ _ _ ps ->
+      foldr (\p acc -> nameInPattern name acc p) regions ps
+
+    Src.PList ps ->
+      foldr (\p acc -> nameInPattern name acc p) regions ps
+
+    Src.PCons hd tl ->
+      let hdRegions = nameInPattern name regions hd in
+      nameInPattern name hdRegions tl
+
+    Src.PChr _ -> regions
+    Src.PStr _ -> regions
+    Src.PInt _ -> regions
 
 
 varQualInExpr :: Name -> Name -> [A.Region] -> Src.Expr -> [A.Region]
