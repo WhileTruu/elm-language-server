@@ -1024,7 +1024,7 @@ findDefinitionHelp ::
   -> Task.Task DefinitionExit (FilePath, Src.Module, Element, Found)
 findDefinitionHelp details root state filePath position =
   Task.eio id $
-  LsReporting.trackDefinition $
+  LsReporting.trackTime "definition" "find definition" $
   Task.run $
   do  src <-
         case Details._outline details of
@@ -3322,7 +3322,7 @@ getSymbols state filePath =
 
 getSymbolsHelp :: Details.Details -> State -> FilePath -> Task.Task DefinitionExit [SymbolInfo]
 getSymbolsHelp details state filePath =
-  Task.eio id $ LsReporting.trackDocumentSymbol $ Task.run $
+  Task.eio id $ LsReporting.trackTime "document_symbol" "symbols" $ Task.run $
   do  src <-
         case Details._outline details of
           Details.ValidApp _ -> loadSrcModuleByPath state filePath
@@ -3419,6 +3419,7 @@ inferTypeAtPositionHelp ::
   -> A.Position
   -> IO (Either DefinitionExit (A.Region, Reporting.Render.Type.Localizer.Localizer, InferType.HoverInfo))
 inferTypeAtPositionHelp root state filePath position =
+  LsReporting.trackTime "docs_for_item" "item docs" $
   BW.withScope $ \scope ->
   Stuff.withRootLock root $ Task.run $
     do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root

@@ -35,17 +35,17 @@ inferHoverInfo
   -> Src.Module
   -> Either Error.Error (Map.Map A.Region HoverInfo)
 inferHoverInfo pkg ifaces modul =
-  case Result.run (Canonicalize.Module.canonicalize pkg ifaces modul) of
-    (_, Left errs) ->
-      Left (Error.BadNames errs)
-
-    (_, Right canonical) ->
+  case snd $ Result.run $ Canonicalize.Module.canonicalize pkg ifaces modul of
+    Right canonical ->
       case System.IO.Unsafe.unsafePerformIO (Infer.runWithRegions =<< Infer.constrain canonical) of
         Left errs ->
           Left (Error.BadTypes (Localizer.fromModule modul) errs)
 
         Right (_, regionTypes) ->
           Right regionTypes
+
+    Left errs ->
+      Left (Error.BadNames errs)
 
 
 
