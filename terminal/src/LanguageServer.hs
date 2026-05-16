@@ -38,6 +38,7 @@ import qualified System.IO as IO
 import qualified System.Directory as Dir
 import qualified System.Exit as Exit
 import qualified System.Process as Proc
+import qualified System.Timeout as Timeout
 import qualified File
 import qualified System.FilePath as Path
 import System.FilePath ((</>), (<.>))
@@ -63,6 +64,14 @@ import qualified Elm.ModuleName as ModuleName
 import qualified BackgroundWriter as BW
 import qualified Http
 import LanguageServer.Reporting as LsReporting
+
+import qualified LanguageServer.Infer as Infer
+import qualified LanguageServer.Infer.Type as InferType
+import qualified Reporting.Render.Type.Localizer
+import qualified Reporting.Render.Type
+import qualified Elm.Interface as Interface
+import qualified Data.OneOrMore as OneOrMore
+
 
 data State =
   State
@@ -135,6 +144,7 @@ handleMessage state method body =
                             [ "definitionProvider" .= True
                             , "documentSymbolProvider" .= True
                             , "documentFormattingProvider" .= Maybe.isJust elmFormat
+                            , "hoverProvider" .= True
                             , "renameProvider" .= Aeson.object
                                [ "prepareProvider" .= True
                                ]
@@ -511,6 +521,56 @@ handleMessage state method body =
                       respondErr requestID $ Reporting.Exit.toString $
                         definitionExitToReport filePath err
 
+    "textDocument/hover" ->
+      do  let result =
+                Aeson.parseEither (\obj ->
+                  do  params <- obj .: "params"
+                      requestID <- obj .: "id" :: Aeson.Parser Int
+
+                      textDocument <- params .: "textDocument"
+                      uri <- textDocument .: "uri" :: Aeson.Parser String
+
+                      position <- params .: "position"
+                      row <- position .: "line" :: Aeson.Parser Int
+                      column <- position .: "character" :: Aeson.Parser Int
+
+                      let filePath = drop 7 uri
+                      let cursor = A.Position
+                                     (fromIntegral row + 1)
+                                     (fromIntegral column + 1)
+
+                      return (requestID, filePath, cursor)
+                ) =<< Aeson.eitherDecode body
+
+          case result of
+            Left err ->
+              do  IO.hPutStr IO.stderr ("Error decoding JSON: " ++ err)
+
+            Right (requestID, filePath, position) ->
+              do  maybeHoverResult <- Timeout.timeout hoverInferenceTimeoutUs $
+                    inferTypeAtPosition state filePath position
+
+                  case maybeHoverResult of
+                    Nothing ->
+                      respond requestID Aeson.Null
+
+                    Just (Left _) ->
+                      respond requestID Aeson.Null
+
+                    Just (Right (region, localizer, hoverInfo)) ->
+                      do  let rendered =
+                                Reporting.Doc.toLine
+                                  (Reporting.Render.Type.canToDoc localizer Reporting.Render.Type.None (InferType._hoverType hoverInfo))
+
+                          respond requestID $
+                            Aeson.object
+                              [ "contents" .= Aeson.object
+                                  [ "kind" .= ("markdown" :: String)
+                                  , "value" .= (renderHoverContents rendered hoverInfo :: String)
+                                  ]
+                              , "range" .= encodeRange region
+                              ]
+
     unknownMethod ->
       putStrFlushErr $ "Unknown method: " ++ unknownMethod
 
@@ -853,6 +913,7 @@ data DefinitionExit
   = DefinitionExitBadDetails Reporting.Exit.Details
   | DefinitionExitBadInput BS.ByteString Reporting.Error.Error
   | DefinitionExitNoRoot
+  | DefinitionExitNoInferredType A.Region
   | DefinitionExitNotFound Element_
   | DefinitionExitNoElement
   | DefinitionExitModuleNotFound FilePath ModuleName.Raw
@@ -877,6 +938,14 @@ definitionExitToReport path exit =
             "Elm packages always have an elm.json that says current the version number. If\
             \ you run this command from a directory with an elm.json file, I will try to bump\
             \ the version in there based on the API changes."
+        ]
+
+    DefinitionExitNoInferredType region ->
+      Reporting.Exit.Help.report "NO INFERRED TYPE" Nothing
+        "I could not find an inferred type for the requested region."
+        [ Reporting.Doc.reflow $
+            "The inference pass succeeded, but it did not record a type for the exact region\
+            \ requested here."
         ]
 
     DefinitionExitNotFound element ->
@@ -911,6 +980,11 @@ definitionExitToReport path exit =
 
     DefinitionExitBadDownload pkg vsn packageProblem ->
       Reporting.Exit.toPackageProblemReport pkg vsn packageProblem
+
+
+hoverInferenceTimeoutUs :: Int
+hoverInferenceTimeoutUs =
+  1500000
 
 
 type Found = A.Located Found_
@@ -950,7 +1024,7 @@ findDefinitionHelp ::
   -> Task.Task DefinitionExit (FilePath, Src.Module, Element, Found)
 findDefinitionHelp details root state filePath position =
   Task.eio id $
-  LsReporting.trackDefinition $
+  LsReporting.trackTime "definition" "find definition" $
   Task.run $
   do  src <-
         case Details._outline details of
@@ -3248,7 +3322,7 @@ getSymbols state filePath =
 
 getSymbolsHelp :: Details.Details -> State -> FilePath -> Task.Task DefinitionExit [SymbolInfo]
 getSymbolsHelp details state filePath =
-  Task.eio id $ LsReporting.trackDocumentSymbol $ Task.run $
+  Task.eio id $ LsReporting.trackTime "document_symbol" "symbols" $ Task.run $
   do  src <-
         case Details._outline details of
           Details.ValidApp _ -> loadSrcModuleByPath state filePath
@@ -3320,6 +3394,170 @@ symbolInfoToJson sym =
     , "kind" Aeson..= (_symbol_kind sym :: Int)
     , "children" Aeson..= map symbolInfoToJson (_symbol_children sym)
     ]
+
+
+
+-- INFER TYPE
+
+
+inferTypeAtPosition ::
+  State
+  -> FilePath
+  -> A.Position
+  -> IO (Either DefinitionExit (A.Region, Reporting.Render.Type.Localizer.Localizer, InferType.HoverInfo))
+inferTypeAtPosition state filePath position =
+  do  maybeRoot <- Dir.withCurrentDirectory (Path.takeDirectory filePath) Stuff.findRoot
+      case maybeRoot of
+        Just root -> inferTypeAtPositionHelp root state filePath position
+        Nothing   -> return $ Left DefinitionExitNoRoot
+
+
+inferTypeAtPositionHelp ::
+  FilePath
+  -> State
+  -> FilePath
+  -> A.Position
+  -> IO (Either DefinitionExit (A.Region, Reporting.Render.Type.Localizer.Localizer, InferType.HoverInfo))
+inferTypeAtPositionHelp root state filePath position =
+  LsReporting.trackTime "docs_for_item" "item docs" $
+  BW.withScope $ \scope ->
+  Stuff.withRootLock root $ Task.run $
+    do  details <- Task.eio DefinitionExitBadDetails $ Details.load Reporting.silent scope root
+        src <-
+          case Details._outline details of
+            Details.ValidApp _ -> loadSrcModuleByPath state filePath
+            Details.ValidPkg name _ _ -> loadPkgModuleByPath state name filePath
+
+        artifacts <- Task.eio (\_ -> DefinitionExitNoRoot) $
+                       Build.fromPaths Reporting.silent root details (Data.NonEmptyList.List filePath [])
+
+        ifaces <- Task.io $ loadInterfaces root details $ Build._modules artifacts
+
+        let pkg =
+              case Details._outline details of
+                Details.ValidApp _ -> Pkg.dummyName
+                Details.ValidPkg name _ _ -> name
+
+        source <- Task.io $ File.readUtf8 filePath
+
+        case Infer.inferHoverInfo pkg ifaces src of
+          Left err -> Task.throw (DefinitionExitBadInput source err)
+          Right regionTypes ->
+            let localizer = Reporting.Render.Type.Localizer.fromModule src
+            in
+            case Infer.lookupHoverInfo position src regionTypes of
+              Just (region, tipe) -> return (region, localizer, tipe)
+              Nothing -> Task.throw DefinitionExitNoElement
+
+
+renderHoverContents :: String -> InferType.HoverInfo -> String
+renderHoverContents rendered hoverInfo =
+  let
+    header =
+      case InferType._hoverName hoverInfo of
+        Just name ->
+          Name.toChars name ++ " : " ++ rendered
+
+        Nothing ->
+          rendered
+  in
+  "```elm\n"
+    ++ header
+    ++ "\n```\n\n----\n\n"
+    ++ hoverKindToLabel (InferType._hoverKind hoverInfo)
+
+
+hoverKindToLabel :: InferType.HoverKind -> String
+hoverKindToLabel hoverKind =
+  case hoverKind of
+    InferType.HoverExpression ->
+      "Expression"
+
+    InferType.HoverLocalValue ->
+      "Local value"
+
+    InferType.HoverLocalParameter ->
+      "Local parameter"
+
+    InferType.HoverLocalBinding ->
+      "Local binding"
+
+    InferType.HoverTopLevelValue ->
+      "Top-level value"
+
+    InferType.HoverImportedValue ->
+      "Imported value"
+
+    InferType.HoverConstructor ->
+      "Constructor"
+
+    InferType.HoverCustomTypeVariant ->
+      "Variant"
+
+    InferType.HoverOperator ->
+      "Operator"
+
+    InferType.HoverRecordField ->
+      "Record field"
+
+    InferType.HoverFieldAccessor ->
+      "Field accessor"
+
+
+loadInterfaces ::
+  FilePath
+  -> Details.Details
+  -> [Build.Module]
+  -> IO (Map.Map ModuleName.Raw Interface.Interface)
+loadInterfaces root details modules =
+  do  localIfaces <- extractInterfaces root modules
+      packageIfaces <- allPackageInterfaces root details
+      return $ Map.union localIfaces packageIfaces
+
+
+extractInterfaces :: FilePath -> [Build.Module] -> IO (Map.Map ModuleName.Raw Interface.Interface)
+extractInterfaces root modules =
+  do  maybes <- traverse (extractInterfacesHelp root) modules
+
+      return $ Map.fromList $ Maybe.catMaybes maybes
+
+
+extractInterfacesHelp :: FilePath -> Build.Module -> IO (Maybe (ModuleName.Raw, Interface.Interface))
+extractInterfacesHelp root modul =
+  case modul of
+    Build.Fresh nameRaw iface _ ->
+      pure $ Just (nameRaw, iface)
+    Build.Cached name _ ciMVar ->
+      Build.loadInterface root (name, ciMVar)
+
+
+allPackageInterfaces :: FilePath -> Details.Details -> IO (Map.Map ModuleName.Raw Interface.Interface)
+allPackageInterfaces root details =
+  do  imvar <- Details.loadInterfaces root details
+      mdeps <- Control.Concurrent.MVar.readMVar imvar
+      case mdeps of
+        Nothing -> return Map.empty
+        Just deps -> return (toInterfaces deps)
+
+
+toInterfaces :: Map.Map ModuleName.Canonical Interface.DependencyInterface -> Map.Map ModuleName.Raw Interface.Interface
+toInterfaces deps =
+  Map.mapMaybe toUnique $ Map.fromListWith OneOrMore.more $
+    Map.elems (Map.mapMaybeWithKey getPublic deps)
+
+
+getPublic :: ModuleName.Canonical -> Interface.DependencyInterface -> Maybe (ModuleName.Raw, OneOrMore.OneOrMore Interface.Interface)
+getPublic (ModuleName.Canonical _ name) dep =
+  case dep of
+    Interface.Public  iface -> Just (name, OneOrMore.one iface)
+    Interface.Private _ _ _ -> Nothing
+
+
+toUnique :: OneOrMore.OneOrMore a -> Maybe a
+toUnique oneOrMore =
+  case oneOrMore of
+    OneOrMore.One value -> Just value
+    OneOrMore.More _ _  -> Nothing
 
 
 

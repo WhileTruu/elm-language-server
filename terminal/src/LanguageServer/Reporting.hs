@@ -7,8 +7,7 @@ module LanguageServer.Reporting
   , RefsKey
   , RefsMsg(..)
   , trackReferences
-  , trackDefinition
-  , trackDocumentSymbol
+  , trackTime
   )
   where
 
@@ -73,7 +72,7 @@ trackReferences callback =
       _ <- forkIO $
         do  takeMVar mvar
             sendCreateWorkDoneProgress "references"
-            sendProgressBegin "references" "🔍 Looking for references"
+            sendProgressBegin "references" "find references"
             referencesLoop timeStart chan 0
             putMVar mvar ()
 
@@ -90,13 +89,15 @@ referencesLoop timeStart chan done =
         Left (RefsDone amount) ->
           do  let !done1 = done + amount
 
-              sendProgressReport "references" $ "Found " ++ show done1
+              sendProgressReport "references" $ "found " ++ show done1
               referencesLoop timeStart chan done1
 
         Right _ ->
           do  timeEnd <- Data.Time.getCurrentTime
               let timeDiff = Data.Time.diffUTCTime timeEnd timeStart
-              sendProgressEnd "references" $ "Found " ++ show done ++ " (" ++ show timeDiff ++ ")"
+              let millis = round (Data.Time.nominalDiffTimeToSeconds timeDiff * 1000)
+              sendProgressEnd "references" $
+                "found " ++ show done ++ " in " ++ show millis ++ "ms"
 
 
 data RefsMsg
@@ -104,40 +105,22 @@ data RefsMsg
 
 
 
--- DEFINITION
+-- GENERIC TRACKING
 
 
-trackDefinition :: IO a -> IO a
-trackDefinition callback =
+trackTime :: String -> String -> IO a -> IO a
+trackTime key label callback =
   do  timeStart <- Data.Time.getCurrentTime
 
-      sendCreateWorkDoneProgress "definition"
-      sendProgressBegin "definition" "👀 Looking for definition"
+      sendCreateWorkDoneProgress key
+      sendProgressBegin key label
 
       answer <- callback
 
       timeEnd <- Data.Time.getCurrentTime
       let timeDiff = Data.Time.diffUTCTime timeEnd timeStart
-      sendProgressEnd "definition" $ "Found (" ++ show timeDiff ++ ")"
-
-      return answer
-
-
--- DOCUMENT SYMBOL
-
-
-trackDocumentSymbol :: IO a -> IO a
-trackDocumentSymbol callback =
-  do  timeStart <- Data.Time.getCurrentTime
-
-      sendCreateWorkDoneProgress "documentSymbol"
-      sendProgressBegin "documentSymbol" "👀 Looking for symbols"
-
-      answer <- callback
-
-      timeEnd <- Data.Time.getCurrentTime
-      let timeDiff = Data.Time.diffUTCTime timeEnd timeStart
-      sendProgressEnd "documentSymbols" $ "Done (" ++ show timeDiff ++ ")"
+      let millis = round (Data.Time.nominalDiffTimeToSeconds timeDiff * 1000)
+      sendProgressEnd key $ "done in " ++ show millis ++ "ms"
 
       return answer
 
@@ -210,4 +193,3 @@ sendNotification method value =
    in do
    BSC.hPutStr stdout (BSC.pack header `BSC.append` content)
    hFlush stdout
-

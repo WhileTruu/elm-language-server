@@ -59,6 +59,12 @@ Executable elm-language-server
         Repl
         LanguageServer
         LanguageServer.Reporting
+        LanguageServer.Infer
+        LanguageServer.Infer.Type
+        LanguageServer.Infer.Pattern
+        LanguageServer.Infer.Expression
+        LanguageServer.Infer.Module
+        LanguageServer.Infer.Solve
 
         -- terminal args
         Terminal
