@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-x-partial #-}
 module Terminal
   ( app
   , Command(..)
@@ -61,7 +62,7 @@ _command details example args_ flags_ callback =
 
 
 app :: P.Doc -> P.Doc -> Command -> IO ()
-app intro outro command@(Command _ _ details example args_ flags_ callback) =
+app _ _ (Command _ _ details example args_ flags_ callback) =
   do  setLocaleEncoding utf8
       argStrings <- Env.getArgs
       case argStrings of

@@ -40,7 +40,7 @@ import qualified Elm.ModuleName as ModuleName
 import qualified Elm.Package as Pkg
 import qualified Elm.Version as V
 import qualified Json.Encode as Encode
-import Reporting.Doc ((<+>), (<>))
+import Reporting.Doc ((<+>))
 import qualified Reporting.Doc as D
 import qualified Reporting.Exit as Exit
 import qualified Reporting.Exit.Help as Help
@@ -48,7 +48,7 @@ import qualified Reporting.Exit.Help as Help
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy.Char8 as BSLC
-import Data.Aeson ((.:), (.=))
+import Data.Aeson ((.=))
 
 
 -- STYLE
@@ -105,6 +105,9 @@ attemptWithStyle style toReport work =
 
         Left x ->
           case style of
+            LanguageServer ->
+              do  Exit.exitFailure
+
             Silent ->
               do  Exit.exitFailure
 
@@ -495,6 +498,9 @@ languageServerBuildLoop chan done =
 reportGenerate :: Style -> NE.List ModuleName.Raw -> FilePath -> IO ()
 reportGenerate style names output =
   case style of
+    LanguageServer ->
+      return ()
+
     Silent ->
       return ()
 

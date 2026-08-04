@@ -14,30 +14,12 @@ module LanguageServer.Reporting
 
 
 import Control.Concurrent
-import Control.Exception (SomeException, AsyncException(UserInterrupt), catch, fromException, throw)
-import Control.Monad (when)
-import qualified Data.ByteString.Builder as B
-import qualified Data.NonEmptyList as NE
 import qualified Data.Time
-import qualified Data.Map.Strict as Map
-import qualified System.Exit as Exit
-import qualified System.Info as Info
-import System.IO (hFlush, hPutStr, hPutStrLn, stderr, stdout)
-
-import qualified Elm.ModuleName as ModuleName
-import qualified Elm.Package as Pkg
-import qualified Elm.Version as V
-import qualified Json.Encode as Encode
-import Reporting.Doc ((<+>), (<>))
-import qualified Reporting.Doc as D
-import qualified Reporting.Exit as Exit
-import qualified Reporting.Exit.Help as Help
-import qualified Reporting.Annotation as A
-
+import System.IO (hFlush, stdout)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy.Char8 as BSLC
-import Data.Aeson ((.:), (.=))
+import Data.Aeson ((.=))
 
 
 
@@ -144,9 +126,9 @@ trackDocumentSymbol callback =
 --
 
 
-putStrFlush :: String -> IO ()
-putStrFlush str =
-  hPutStr stdout str >> hFlush stdout
+-- putStrFlush :: String -> IO ()
+-- putStrFlush str =
+--   hPutStr stdout str >> hFlush stdout
 
 
 

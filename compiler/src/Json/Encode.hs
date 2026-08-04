@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Json.Encode
   ( write
@@ -28,7 +27,6 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Builder as B
 import qualified Data.Map as Map
 import qualified Data.Scientific as Sci
-import Data.Monoid ((<>))
 import qualified Data.Name as Name
 import qualified Data.Utf8 as Utf8
 

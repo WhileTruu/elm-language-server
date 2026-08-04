@@ -2,7 +2,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 {-# OPTIONS_GHC -Werror=incomplete-uni-patterns #-}
 {-# OPTIONS_GHC -Werror=incomplete-record-updates #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, DoAndIfThenElse, BangPatterns #-}
 
 module LanguageServer
   ( run
@@ -282,10 +282,10 @@ handleMessage state method body =
 
                       position <- params .: "position"
                       row <- position .: "line" :: Aeson.Parser Int
-                      column <- position .: "character" :: Aeson.Parser Int
+                      col <- position .: "character" :: Aeson.Parser Int
 
                       let filePath = drop 7 uri
-                      let pos = A.Position (fromIntegral row + 1) (fromIntegral column + 1)
+                      let pos = A.fromRowCol (fromIntegral row) (fromIntegral col)
 
                       return (requestID, filePath, pos)
                 ) =<< Aeson.eitherDecode body
@@ -316,12 +316,10 @@ handleMessage state method body =
 
                       position <- params .: "position"
                       row <- position .: "line" :: Aeson.Parser Int
-                      column <- position .: "character" :: Aeson.Parser Int
+                      col <- position .: "character" :: Aeson.Parser Int
 
                       let filePath = drop 7 uri
-                      let pos = A.Position
-                                       (fromIntegral row + 1)
-                                       (fromIntegral column + 1)
+                      let pos = A.fromRowCol (fromIntegral row) (fromIntegral col)
 
                       return (requestID, filePath, pos)
                 ) =<< Aeson.eitherDecode body
@@ -356,12 +354,10 @@ handleMessage state method body =
 
                       position <- params .: "position"
                       row <- position .: "line" :: Aeson.Parser Int
-                      column <- position .: "character" :: Aeson.Parser Int
+                      col <- position .: "character" :: Aeson.Parser Int
 
                       let filePath = drop 7 uri
-                      let pos = A.Position
-                                       (fromIntegral row + 1)
-                                       (fromIntegral column + 1)
+                      let pos = A.fromRowCol (fromIntegral row) (fromIntegral col)
 
                       return (requestID, filePath, pos)
                 ) =<< Aeson.eitherDecode body
@@ -394,13 +390,11 @@ handleMessage state method body =
 
                       position <- params .: "position"
                       row <- position .: "line" :: Aeson.Parser Int
-                      column <- position .: "character" :: Aeson.Parser Int
+                      col <- position .: "character" :: Aeson.Parser Int
                       newName <- params .: "newName" :: Aeson.Parser String
 
                       let filePath = drop 7 uri
-                      let pos = A.Position
-                                       (fromIntegral row + 1)
-                                       (fromIntegral column + 1)
+                      let pos = A.fromRowCol (fromIntegral row) (fromIntegral col)
 
                       return (requestID, filePath, pos, newName)
                 ) =<< Aeson.eitherDecode body
@@ -569,9 +563,9 @@ parsePosition :: Aeson.Value -> Aeson.Parser A.Position
 parsePosition =
   Aeson.withObject "Position" $ \position ->
     do  row <- position .: "line" :: Aeson.Parser Int
-        column <- position .: "character" :: Aeson.Parser Int
+        col <- position .: "character" :: Aeson.Parser Int
 
-        return $ A.Position (fromIntegral row + 1) (fromIntegral column + 1)
+        return $ A.fromRowCol (fromIntegral row) (fromIntegral col)
 
 
 parseRange :: Aeson.Value -> Aeson.Parser (A.Position, A.Position)
@@ -608,11 +602,13 @@ applyChanges changes content =
 
 
 applyChange :: BS.ByteString -> A.Position -> A.Position -> String -> BS.ByteString
-applyChange content (A.Position sr sc) (A.Position er ec) newTextStr =
+applyChange content (A.Position startPos) (A.Position endPos) newTextStr =
   let
+    (sr, sc) = A.toRowCol startPos
+    (er, ec) = A.toRowCol endPos
     newText = BS_UTF8.fromString newTextStr
     lines_ = BSC.split '\n' content
-    ( before, rest ) = splitAt (fromIntegral sr - 1) lines_
+    ( before, rest ) = splitAt (fromIntegral sr) lines_
     startTargetLine =
       case rest of
         a : _ -> a
@@ -625,8 +621,8 @@ applyChange content (A.Position sr sc) (A.Position er ec) newTextStr =
         a : b -> ( a, b )
         [] -> ( BS.empty, [] )
 
-    ( start, _ ) = BSC.splitAt (fromIntegral sc - 1) startTargetLine
-    ( _, end ) = BSC.splitAt (fromIntegral ec - 1) endTargetLine
+    ( start, _ ) = BSC.splitAt (fromIntegral sc) startTargetLine
+    ( _, end ) = BSC.splitAt (fromIntegral ec) endTargetLine
 
     updated = BS.concat [ start, newText, end ]
   in
@@ -677,17 +673,17 @@ sendProgressBegin token title = do
     )
 
 
-sendProgressReport :: String -> String -> IO ()
-sendProgressReport token message = do
-  sendNotification "$/progress"
-    (Aeson.object
-      [ "token" Aeson..= token
-      , "value" Aeson..= Aeson.object
-        [ "kind" Aeson..= ("report" :: String)
-        , "message" Aeson..= message
-        ]
-      ]
-    )
+-- sendProgressReport :: String -> String -> IO ()
+-- sendProgressReport token message = do
+--   sendNotification "$/progress"
+--     (Aeson.object
+--       [ "token" Aeson..= token
+--       , "value" Aeson..= Aeson.object
+--         [ "kind" Aeson..= ("report" :: String)
+--         , "message" Aeson..= message
+--         ]
+--       ]
+--     )
 
 
 sendProgressEnd :: String -> String -> IO ()
@@ -735,32 +731,39 @@ respondErr idValue message =
 
 
 encodeRegion :: FilePath -> A.Region -> Aeson.Value
-encodeRegion filePath (A.Region (A.Position sr sc) (A.Position er ec)) =
+encodeRegion filePath (A.Region start end) =
+  let
+    (sr, sc) = A.toRowCol start
+    (er, ec) = A.toRowCol end
+  in
   Aeson.object
     [ "uri" .= ("file://" ++ filePath :: String)
     , "range" .= Aeson.object
         [ "start" .= Aeson.object
-            [ "line" .= (sr - 1)
-            , "character" .= (sc - 1)
+            [ "line" .= sr
+            , "character" .= sc
             ]
         , "end" .= Aeson.object
-            [ "line" .= (er - 1)
-            , "character" .= (ec - 1)
+            [ "line" .= er
+            , "character" .= ec
             ]
         ]
     ]
 
 
 encodeRange :: A.Region -> Aeson.Value
-encodeRange (A.Region (A.Position sr sc) (A.Position er ec)) =
-  Aeson.object
+encodeRange (A.Region start end) =
+  let
+    (sr, sc) = A.toRowCol start
+    (er, ec) = A.toRowCol end
+  in  Aeson.object
     [ "start" .= Aeson.object
-        [ "line" .= (sr - 1)
-        , "character" .= (sc - 1)
+        [ "line" .= sr
+        , "character" .= sc
         ]
     , "end" .= Aeson.object
-        [ "line" .= (er - 1)
-        , "character" .= (ec - 1)
+        [ "line" .= er
+        , "character" .= ec
         ]
     ]
 
@@ -826,18 +829,9 @@ publishReportDiagnostic filePath severity reports =
     (Aeson.object
       [ "uri" Aeson..= ("file://" ++ filePath :: String)
       , "diagnostics" Aeson..= map
-        (\(Reporting.Report.Report title (A.Region (A.Position sr sc) (A.Position er ec)) _sgstns message) ->
+        (\(Reporting.Report.Report title region _sgstns message) ->
           Aeson.object
-            [ "range" Aeson..= Aeson.object
-              [ "start" Aeson..= Aeson.object
-                [ "line" Aeson..= (sr - 1)
-                , "character" Aeson..= (sc - 1)
-                ]
-              , "end" Aeson..= Aeson.object
-                [ "line" Aeson..= (er - 1)
-                , "character" Aeson..= (ec - 1)
-                ]
-              ]
+            [ "range" Aeson..= encodeRange region
             , "severity" Aeson..= (severity :: Int)
             , "message" Aeson..= (map Char.toUpper title ++ "\n\n" ++ Reporting.Doc.toString message :: String)
             ]
@@ -1714,12 +1708,13 @@ findElementInValues pos values =
 
 isPositionOnValueName :: A.Position -> A.Located Src.Value -> Bool
 isPositionOnValueName pos value =
-    let (A.At (A.Region (A.Position sr _) _) (Src.Value name _ _ typeAnn)) = value
+    let !(A.At (A.Region start _) (Src.Value name _ _ typeAnn)) = value
         valNameLen = fromIntegral (length (Name.toChars (A.toValue name)))
+        sr = fromIntegral (A.toRow start)
     in
     isInRegion pos (A.toRegion name)
       || (Maybe.isJust typeAnn
-           && isInRegion pos (A.Region (A.Position sr 0) (A.Position sr valNameLen))
+           && isInRegion pos (A.region (A.fromRowCol sr 0) (A.fromRowCol sr valNameLen))
          )
 
 
@@ -1758,7 +1753,12 @@ findElementInType pos type_ =
 
 
 isInRegion :: A.Position -> A.Region -> Bool
-isInRegion (A.Position row col) (A.Region (A.Position startRow startCol) (A.Position endRow endCol)) =
+isInRegion (A.Position pos) (A.Region start end) =
+  let
+    (row, col) = A.toRowCol pos
+    (startRow, startCol) = A.toRowCol start
+    (endRow, endCol) = A.toRowCol end
+  in
   (row == startRow && col >= startCol || row > startRow)
     && (row == endRow && col <= endCol || row < endRow)
 
@@ -1887,9 +1887,14 @@ findElementInExpr pos defs patterns expr =
                         case t of
                           Just _ ->
                             let
-                              (A.Region (A.Position r c) _) = A.toRegion def
+                              !(A.Region start _) = A.toRegion def
                               nameLen = fromIntegral (length (Name.toChars (A.toValue name)))
-                              region = A.Region (A.Position r c) (A.Position r (c + nameLen))
+                              region = A.region
+                                         (A.Position start)
+                                         (A.fromRowCol
+                                            (fromIntegral (A.toRow start))
+                                            (fromIntegral (A.toCol start) + nameLen)
+                                         )
                             in
                             if isInRegion pos region then
                               Just $ A.At region $ EVar letDefs patterns (A.toValue name)
@@ -2144,7 +2149,7 @@ findReferences state filePath position =
         refs <- Task.io $ findReferencesHelp (RefsEnv state root details) modulePath src found
 
         return $
-          Map.map (List.sortOn (\(A.Region (A.Position start _) _) -> start)) refs
+          Map.map (List.sortOn (\(A.Region start _) -> A.toRow start)) refs
 
 
 findReferencesHelp :: RefsEnv -> FilePath -> Src.Module -> Found -> IO (Map.Map FilePath [A.Region])
@@ -2429,11 +2434,13 @@ findReferencesForImportedVar moduleName name src =
 
 
 keepOnlyNameRegionInVarQualRegion :: Name -> A.Region -> A.Region
-keepOnlyNameRegionInVarQualRegion name (A.Region _ (A.Position endRow endCol)) =
+keepOnlyNameRegionInVarQualRegion name (A.Region _ end) =
   let
     nameLength = fromIntegral (length (Name.toChars name))
   in
-  A.Region (A.Position endRow (endCol - nameLength)) (A.Position endRow endCol)
+  A.region
+    (A.fromRowCol (fromIntegral (A.toRow end)) (fromIntegral (A.toCol end) - nameLength))
+    (A.fromRowCol (fromIntegral (A.toRow end)) (fromIntegral (A.toCol end)))
 
 
 loadSrcModule :: State -> Details.Details -> FilePath -> ModuleName.Raw -> IO (Either DefinitionExit (FilePath, Src.Module))
@@ -2457,10 +2464,11 @@ loadSrcModule state details root moduleName =
                 do  source <-
                       maybe (File.readUtf8 local) return $
                         Map.lookup local files
+                    parsed <- Parse.fromByteString projectType source
 
                     return $
                       Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                        (fmap ((,) local) (Parse.fromByteString projectType source))
+                        (fmap ((,) local) parsed)
 
         Nothing ->
           do  let maybePkg = lookupPkgName details moduleName
@@ -2483,10 +2491,11 @@ loadSrcModule state details root moduleName =
                         do  source <-
                               maybe (File.readUtf8 path) return $
                                 Map.lookup path files
+                            parsed <- Parse.fromByteString projectType source
 
                             return $
                               Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                                (fmap ((,) path) (Parse.fromByteString projectType source))
+                                (fmap ((,) path) parsed)
 
                       else
                         do  let workDoneToken = "package-download"
@@ -2512,10 +2521,11 @@ loadSrcModule state details root moduleName =
                                 do  source <-
                                       maybe (File.readUtf8 path) return $
                                         Map.lookup path files
+                                    parsed <- Parse.fromByteString projectType source
 
                                     return $
                                       Data.Bifunctor.first (DefinitionExitBadInput source . Reporting.Error.BadSyntax) $
-                                        (fmap ((,) path) (Parse.fromByteString projectType source))
+                                        (fmap ((,) path) parsed)
 
                 _ ->
                   return $ Left $ DefinitionExitModuleNotFound root moduleName
@@ -2532,8 +2542,9 @@ loadSrcModuleByPath :: State -> FilePath -> Task.Task DefinitionExit Src.Module
 loadSrcModuleByPath state filePath =
   do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
       source <- maybe (Task.io $ File.readUtf8 filePath) return $ Map.lookup filePath files
+      parsed <- Task.io $ Parse.fromByteString Parse.Application source
 
-      case Parse.fromByteString Parse.Application source of
+      case parsed of
         Left err ->
           Task.throw (DefinitionExitBadInput source (Reporting.Error.BadSyntax err))
 
@@ -2545,8 +2556,9 @@ loadPkgModuleByPath :: State -> Pkg.Name -> FilePath -> Task.Task DefinitionExit
 loadPkgModuleByPath state pkgName filePath =
   do  files <- Task.io $ Control.Concurrent.MVar.readMVar (_changedFiles state)
       source <- maybe (Task.io $ File.readUtf8 filePath) return $ Map.lookup filePath files
+      result <- Task.io $ Parse.fromByteString (Parse.Package pkgName) source
 
-      case Parse.fromByteString (Parse.Package pkgName) source of
+      case result of
         Left err ->
           Task.throw (DefinitionExitBadInput source (Reporting.Error.BadSyntax err))
 
@@ -2597,10 +2609,12 @@ valueRegions (A.At region (Src.Value name _ _ type_)) =
   case type_ of
     Just _ ->
       [ let
-          (A.Region (A.Position startRow _) _) = region
+          !(A.Region start _) = region
           nameLength = fromIntegral (length (Name.toChars (A.toValue name)))
         in
-        A.Region (A.Position startRow 1) (A.Position startRow (nameLength + 1))
+        A.region
+          (A.fromRowCol (fromIntegral (A.toRow start)) 0)
+          (A.fromRowCol (fromIntegral (A.toRow start)) nameLength)
       , A.toRegion name
       ]
 
@@ -3226,9 +3240,9 @@ toAbsoluteSrcDir root srcDir =
     )
 
 
-addRelative :: AbsoluteSrcDir -> FilePath -> FilePath
-addRelative (AbsoluteSrcDir srcDir) path =
-  srcDir </> path
+-- addRelative :: AbsoluteSrcDir -> FilePath -> FilePath
+-- addRelative (AbsoluteSrcDir srcDir) path =
+--   srcDir </> path
 
 
 
@@ -3284,7 +3298,7 @@ getSymbolsHelp details state filePath =
                   )
                   (Src._binops src)
               ]
-              & List.sortOn (\a -> let (A.Region (A.Position start _) _) = _symbol_region a in start)
+              & List.sortOn (\a -> let !(A.Region start _) = _symbol_region a in A.toRow start)
 
       return $
         maybe

@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Reporting.Render.Type.Localizer
   ( Localizer
@@ -17,7 +16,6 @@ import qualified Data.Set as Set
 
 import qualified AST.Source as Src
 import qualified Elm.ModuleName as ModuleName
-import Reporting.Doc ((<>))
 import qualified Reporting.Doc as D
 import qualified Reporting.Annotation as A
 

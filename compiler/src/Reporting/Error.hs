@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Reporting.Error
   ( Module(..)
@@ -197,19 +196,14 @@ reportToJson (Report.Report title region _sgstns message) =
 
 
 encodeRegion :: A.Region -> E.Value
-encodeRegion (A.Region (A.Position sr sc) (A.Position er ec)) =
+encodeRegion (A.Region start end) =
   E.object
-    [ "start" ==>
-          E.object
-            [ "line" ==> E.int (fromIntegral sr)
-            , "column" ==> E.int (fromIntegral sc)
-            ]
-    , "end" ==>
-          E.object
-            [ "line" ==> E.int (fromIntegral er)
-            , "column" ==> E.int (fromIntegral ec)
-            ]
+    [ "start" ==> E.object [ "line" ==> E.int sr, "column" ==> E.int sc ]
+    , "end"   ==> E.object [ "line" ==> E.int er, "column" ==> E.int ec ]
     ]
+  where
+    (sr,sc) = A.toEditorRowCol start
+    (er,ec) = A.toEditorRowCol end
 
 
 

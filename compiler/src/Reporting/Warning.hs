@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Reporting.Warning
   ( Warning(..)
@@ -9,7 +8,6 @@ module Reporting.Warning
   where
 
 
-import Data.Monoid ((<>))
 import qualified Data.Name as Name
 
 import qualified AST.Canonical as Can
