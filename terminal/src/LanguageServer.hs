@@ -149,7 +149,7 @@ handleMessage state method body =
                             ]
                           , "serverInfo" .= Aeson.object
                             [ "name" .= ("whiletruu-elm-language-server" :: String)
-                            , "version" .= ("1.2.1" :: String)
+                            , "version" .= ("1.3.0" :: String)
                             ]
                           ]
 

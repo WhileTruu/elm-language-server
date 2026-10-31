@@ -244,7 +244,11 @@ verifyPkg env time (Outline.PkgOutline pkg _ _ _ exposed direct testDirect elm) 
 
 verifyApp :: Env -> File.Time -> Outline.AppOutline -> Task Details
 verifyApp env time outline@(Outline.AppOutline elmVersion srcDirs direct _ _ _) =
-  if elmVersion == V.compiler
+  -- LANGUAGE SERVER: support all major and minor versions
+  if
+    V._major elmVersion == V._major V.compiler
+    &&
+    V._minor elmVersion == V._minor V.compiler
   then
     do  stated <- checkAppDeps outline
         actual <- verifyConstraints env (Map.map Con.exactly stated)

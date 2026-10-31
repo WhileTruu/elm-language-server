@@ -3,11 +3,11 @@
   lib,
   makeWrapper,
 }: self:
-pkgs.haskell.packages.ghc96.override {
+pkgs.haskell.packages.ghc914.override {
   overrides = self: super: let
     inherit (pkgs.haskell.lib.compose) overrideCabal;
     elmPkgs = rec {
-      elm-language-server = overrideCabal (drv: {
+      elm-language-server = pkgs.haskell.lib.compose.appendConfigureFlag "--ghc-options=-Wno-incomplete-patterns" (overrideCabal (drv: {
         # sadly parallelism most of the time breaks compilation
         enableParallelBuilding = false;
         patches = [];
@@ -18,7 +18,7 @@ pkgs.haskell.packages.ghc96.override {
         license = lib.licenses.bsd3;
         maintainers = with lib.maintainers; [];
         mainProgram = "elm-language-server";
-      }) (self.callPackage ./elm-language-server {});
+      }) (self.callPackage ./elm-language-server {}));
 
       # Fix TLS issues
       # see https://github.com/elm/compiler/pull/2325

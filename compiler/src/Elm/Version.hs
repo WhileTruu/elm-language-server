@@ -54,9 +54,9 @@ max =
   Version maxBound 0 0
 
 
-{-| Elm language version the LS works with. -}
+{-| Elm language version the LS is based on. -}
 languageServerElmVersion :: Version.Version
-languageServerElmVersion = Version.Version [0, 19, 1] []
+languageServerElmVersion = Version.Version [0, 19, 2] []
 
 
 compiler :: Version
