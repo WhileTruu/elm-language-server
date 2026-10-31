@@ -75,16 +75,16 @@ IDE/editor's LSP integration use the language server:
 
 ### Prerequisites
 
-- GHC version `9.2.8`
-- Cabal version `3.10.3.0`
+- GHC version `9.14.1`
+- Cabal version `3.16.1.0`
 
 ### Build
-`cabal new-build --ghc-option=-split-sections` seems to work!
+`cabal new-build` seems to work!
 
 ### Development
 
-haskell-language-server version 2.9.0.0 works.
-install with `ghcup install hls 2.9.0.0`
+haskell-language-server version 2.14.0.0 works.
+install with `ghcup install hls 2.14.0.0`
 
 # Acknowledgements
 
