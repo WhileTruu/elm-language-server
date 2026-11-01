@@ -66,4 +66,5 @@ jobs:
         run: |
           gh release upload "${{ inputs.tag }}" \
             release-assets/*/*.tar.gz \
-            --clobber
+            --clobber \
+            --repo "${{ github.repository }}"

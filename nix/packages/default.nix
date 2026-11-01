@@ -24,6 +24,8 @@ pkgs.haskell.packages.ghc914.override {
       # see https://github.com/elm/compiler/pull/2325
       # and https://discourse.elm-lang.org/t/elm-init-tls-issue/10231/11
       tls = self.callPackage ./tls-1.9.0.nix { };
+
+      HTTP = pkgs.haskell.lib.dontCheck super.HTTP;
     };
   in
     elmPkgs
